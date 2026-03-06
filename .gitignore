@@ -1,0 +1,35 @@
+# Data files (sensitive, not for public repos)
+*.xlsx
+*.docx
+*.zip
+*.gpkg
+*.gdb
+*.sqlite
+*.csv
+
+# Equipment configs (sensitive network data)
+unzipped_equip/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# SQLite
+*.sqlite-wal
+*.sqlite-shm
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Claude internal
+.claude/

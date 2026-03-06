@@ -1,0 +1,301 @@
+[
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-12b422d91b1215f8",
+      "NW_HUBSITE_16490452"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00123",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-7fd42cbcd6d68359",
+      "NW_HUBSITE_3465402"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00127",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-23286ae1decad58c"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00165",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-2e37b6d1bfdaf8ee"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00168",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-2e37b6d1bfdaf8ee"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00169",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-2e37b6d1bfdaf8ee"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00552",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f",
+      "PTY-9e9941bca4dc71c6",
+      "NW_HUBSITE_3465442"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00041",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f",
+      "NW_HUBSITE_5482609",
+      "NW_HUBSITE_12947394"
+    ],
+    "justification": "A site candidate already exists in the endpoint matching output; analyst may promote it to a stable alias override.",
+    "proposed_action": "override_site_alias",
+    "requires_human_check": true,
+    "service_id": "SVC-00042",
+    "target_key": "Mairie Bienville",
+    "target_table": "override_site_alias",
+    "target_value": "NW_HUBSITE_12947394",
+    "unsafe_if": "Another Hubsite shares the same alias or city token."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00043",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f",
+      "NW_HUBSITE_6167681",
+      "NW_HUBSITE_12952513"
+    ],
+    "justification": "A site candidate already exists in the endpoint matching output; analyst may promote it to a stable alias override.",
+    "proposed_action": "override_site_alias",
+    "requires_human_check": true,
+    "service_id": "SVC-00044",
+    "target_key": "Mairie Janville",
+    "target_table": "override_site_alias",
+    "target_value": "NW_HUBSITE_12952513",
+    "unsafe_if": "Another Hubsite shares the same alias or city token."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00045",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00046",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "medium",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f",
+      "NW_HUBSITE_27683472",
+      "NW_HUBSITE_6232337"
+    ],
+    "justification": "A site candidate already exists in the endpoint matching output; analyst may promote it to a stable alias override.",
+    "proposed_action": "override_site_alias",
+    "requires_human_check": true,
+    "service_id": "SVC-00047",
+    "target_key": "BDP BOIS DE PLAISANCE-VENETTE",
+    "target_table": "override_site_alias",
+    "target_value": "NW_HUBSITE_27683472",
+    "unsafe_if": "Another Hubsite shares the same alias or city token."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00050",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00051",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "medium",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f",
+      "NW_HUBSITE_5504993",
+      "NW_HUBSITE_12751889"
+    ],
+    "justification": "A site candidate already exists in the endpoint matching output; analyst may promote it to a stable alias override.",
+    "proposed_action": "override_site_alias",
+    "requires_human_check": true,
+    "service_id": "SVC-00052",
+    "target_key": "Mairie de Jaux",
+    "target_table": "override_site_alias",
+    "target_value": "NW_HUBSITE_5504993",
+    "unsafe_if": "Another Hubsite shares the same alias or city token."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f",
+      "NW_HUBSITE_5503779",
+      "NW_HUBSITE_12805971"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00048",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f",
+      "NW_HUBSITE_5503779",
+      "NW_HUBSITE_13126275"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00054",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f",
+      "PTY-14fb4d7449fbe52e",
+      "NW_HUBSITE_6167681"
+    ],
+    "justification": "A site candidate already exists in the endpoint matching output; analyst may promote it to a stable alias override.",
+    "proposed_action": "override_site_alias",
+    "requires_human_check": true,
+    "service_id": "SVC-00049",
+    "target_key": "EGLISE DE LA STE TRINITE",
+    "target_table": "override_site_alias",
+    "target_value": "NW_HUBSITE_8011713",
+    "unsafe_if": "Another Hubsite shares the same alias or city token."
+  },
+  {
+    "confidence": "low",
+    "evidence_keys": [
+      "PTY-16f61383c86ae91f",
+      "PTY-33d3c4ad4d5fb8b5"
+    ],
+    "justification": "No deterministic offline suggestion available; analyst review required.",
+    "proposed_action": "escalate",
+    "requires_human_check": true,
+    "service_id": "SVC-00053",
+    "target_key": "",
+    "target_table": "",
+    "target_value": "",
+    "unsafe_if": "Applied without analyst validation."
+  }
+]
