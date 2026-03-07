@@ -5,12 +5,11 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import unicodedata
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import tool
-
-from service_ref.review.batching import fetch_service_context as _fetch_ctx
+from ..sdk_compat import tool
 
 _db_path: Path | None = None
 
@@ -47,6 +46,227 @@ def _guard_sql(sql: str) -> str | None:
 
 def _text(content: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": content}]}
+
+
+def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {key: row[key] for key in row.keys()}
+
+
+def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    return [_row_to_dict(row) for row in rows if row is not None]
+
+
+def _normalize_alias(value: object) -> str:
+    text = "" if value is None else str(value)
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.upper()
+    text = re.sub(r"[^A-Z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+    service = con.execute(
+        "SELECT * FROM service_master_active WHERE service_id = ?",
+        (service_id,),
+    ).fetchone()
+
+    evidences = con.execute(
+        """
+        SELECT evidence_type, rule_name, score, source_table, source_key, payload_json
+        FROM service_match_evidence
+        WHERE service_id = ?
+        ORDER BY score DESC, evidence_type, rule_name
+        LIMIT 10
+        """,
+        (service_id,),
+    ).fetchall()
+    review_items = con.execute(
+        """
+        SELECT review_type, severity, reason, context_json
+        FROM service_review_queue
+        WHERE service_id = ?
+        ORDER BY severity DESC, review_type
+        """,
+        (service_id,),
+    ).fetchall()
+    party_rows = con.execute(
+        """
+        SELECT service_id, role_name, party_id, rule_name, score
+        FROM service_party
+        WHERE service_id = ?
+        ORDER BY score DESC, role_name
+        """,
+        (service_id,),
+    ).fetchall()
+    endpoint_rows = con.execute(
+        """
+        SELECT service_id, endpoint_label, raw_value, matched_site_id, matched_site_name, score, rule_name
+        FROM service_endpoint
+        WHERE service_id = ?
+        ORDER BY score DESC, endpoint_label
+        """,
+        (service_id,),
+    ).fetchall()
+    network_support_rows = con.execute(
+        """
+        SELECT *
+        FROM service_support_reseau
+        WHERE service_id = ?
+        """,
+        (service_id,),
+    ).fetchall()
+    optical_support_rows = con.execute(
+        """
+        SELECT *
+        FROM service_support_optique
+        WHERE service_id = ?
+        """,
+        (service_id,),
+    ).fetchall()
+    gold_row = con.execute(
+        "SELECT * FROM gold_service_active WHERE service_id = ?",
+        (service_id,),
+    ).fetchone()
+
+    return {
+        "service": _row_to_dict(service),
+        "review_items": [
+            {
+                "review_type": row["review_type"],
+                "severity": row["severity"],
+                "reason": row["reason"],
+                "context": json.loads(row["context_json"]) if row["context_json"] else None,
+            }
+            for row in review_items
+        ],
+        "pipeline_evidences": [
+            {
+                "evidence_type": row["evidence_type"],
+                "rule_name": row["rule_name"],
+                "score": row["score"],
+                "source_table": row["source_table"],
+                "source_key": row["source_key"],
+                "payload": json.loads(row["payload_json"]) if row["payload_json"] else None,
+            }
+            for row in evidences
+        ],
+        "party_rows": _rows_to_dicts(party_rows),
+        "endpoint_rows": _rows_to_dicts(endpoint_rows),
+        "network_support_rows": _rows_to_dicts(network_support_rows),
+        "optical_support_rows": _rows_to_dicts(optical_support_rows),
+        "gold_row": _row_to_dict(gold_row),
+    }
+
+
+def _resolve_party_candidates(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+    service = con.execute(
+        """
+        SELECT service_id, principal_client, client_final
+        FROM service_master_active
+        WHERE service_id = ?
+        """,
+        (service_id,),
+    ).fetchone()
+    if service is None:
+        return {
+            "service_id": service_id,
+            "principal_client_raw": "",
+            "client_final_raw": "",
+            "pipeline_contract_parties": [],
+            "pipeline_final_parties": [],
+            "principal_client_alias_matches": [],
+            "client_final_alias_matches": [],
+            "recommended_final_party_id": None,
+            "recommended_final_party_name": None,
+            "recommendation_confidence": "none",
+            "reason": "service_id not found in service_master_active",
+        }
+
+    pipeline_contract = con.execute(
+        """
+        SELECT sp.party_id, pm.canonical_name, sp.rule_name, sp.score
+        FROM service_party sp
+        LEFT JOIN party_master pm ON pm.party_id = sp.party_id
+        WHERE sp.service_id = ? AND sp.role_name = 'contract_party'
+        ORDER BY sp.score DESC, sp.party_id
+        """,
+        (service_id,),
+    ).fetchall()
+    pipeline_final = con.execute(
+        """
+        SELECT sp.party_id, pm.canonical_name, sp.rule_name, sp.score
+        FROM service_party sp
+        LEFT JOIN party_master pm ON pm.party_id = sp.party_id
+        WHERE sp.service_id = ? AND sp.role_name = 'final_party'
+        ORDER BY sp.score DESC, sp.party_id
+        """,
+        (service_id,),
+    ).fetchall()
+
+    def alias_matches(raw_value: object) -> list[dict[str, Any]]:
+        normalized = _normalize_alias(raw_value)
+        if not normalized:
+            return []
+        rows = con.execute(
+            """
+            SELECT pa.party_id, pm.canonical_name, pa.alias_value, pa.normalized_alias,
+                   pa.source_table, pa.source_key
+            FROM party_alias pa
+            LEFT JOIN party_master pm ON pm.party_id = pa.party_id
+            WHERE pa.normalized_alias = ?
+            ORDER BY pm.canonical_name, pa.alias_value
+            """,
+            (normalized,),
+        ).fetchall()
+        matches = []
+        for row in rows:
+            matches.append(
+                {
+                    "party_id": row["party_id"],
+                    "canonical_name": row["canonical_name"],
+                    "alias_value": row["alias_value"],
+                    "normalized_alias": row["normalized_alias"],
+                    "source_table": row["source_table"],
+                    "source_key": row["source_key"],
+                }
+            )
+        return matches
+
+    principal_alias_matches = alias_matches(service["principal_client"])
+    client_final_alias_matches = alias_matches(service["client_final"])
+
+    recommended_final_party_id: str | None = None
+    recommended_final_party_name: str | None = None
+    recommendation_confidence = "none"
+    reason = "no deterministic final party candidate found"
+
+    if pipeline_final:
+        recommended_final_party_id = pipeline_final[0]["party_id"]
+        recommended_final_party_name = pipeline_final[0]["canonical_name"]
+        recommendation_confidence = "high"
+        reason = "pipeline final_party already exists"
+    elif client_final_alias_matches:
+        recommended_final_party_id = client_final_alias_matches[0]["party_id"]
+        recommended_final_party_name = client_final_alias_matches[0]["canonical_name"]
+        recommendation_confidence = "medium"
+        reason = "exact alias match on client_final_raw"
+
+    return {
+        "service_id": service_id,
+        "principal_client_raw": service["principal_client"] or "",
+        "client_final_raw": service["client_final"] or "",
+        "pipeline_contract_parties": _rows_to_dicts(pipeline_contract),
+        "pipeline_final_parties": _rows_to_dicts(pipeline_final),
+        "principal_client_alias_matches": principal_alias_matches,
+        "client_final_alias_matches": client_final_alias_matches,
+        "recommended_final_party_id": recommended_final_party_id,
+        "recommended_final_party_name": recommended_final_party_name,
+        "recommendation_confidence": recommendation_confidence,
+        "reason": reason,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +418,9 @@ async def describe_table(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "fetch_service_context",
-    "Retourne le contexte complet d'un service en un seul appel : "
-    "evidences du pipeline, items de review, top sites matches, parties. "
-    "Ideal pour comprendre rapidement un service avant de soumettre une resolution.",
+    "Retourne le bundle complet d'un service : ligne pivot, review items, "
+    "evidences pipeline, parties, endpoints, supports reseau/optiques et etat gold. "
+    "Ideal pour comprendre un service sans multiplier les requetes exploratoires.",
     {"service_id": str},
 )
 async def fetch_service_context(args: dict[str, Any]) -> dict[str, Any]:
@@ -210,8 +430,30 @@ async def fetch_service_context(args: dict[str, Any]) -> dict[str, Any]:
 
     con = _connect(read_only=True)
     try:
-        ctx = _fetch_ctx(con, service_id)
+        ctx = _fetch_service_bundle(con, service_id)
         return _text(json.dumps(ctx, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "resolve_party_candidates",
+    "Retourne les candidats party pour un service : contract_party pipeline, "
+    "final_party pipeline, matches d'alias sur principal_client et client_final, "
+    "et une recommandation deterministe quand un final_party est prouvable.",
+    {"service_id": str},
+)
+async def resolve_party_candidates(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _resolve_party_candidates(con, service_id)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     except Exception as e:
         return _text(f"ERROR: {e}")
     finally:

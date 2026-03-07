@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import tool
+from ..sdk_compat import tool
 
 _config_dir: Path | None = None
 _config_available: bool = False

@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import tool
+from ..sdk_compat import tool
 
 from .validation_lib import validate_site, validate_device_pop, validate_route_endpoints
 
@@ -81,6 +81,21 @@ def _text(content: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": content}]}
 
 
+def _distinct_evidence_types(evidences: list[dict[str, Any]]) -> set[str]:
+    return {str(ev.get("evidence_type", "unknown")).strip() or "unknown" for ev in evidences}
+
+
+def _has_party_search_evidence(evidences: list[dict[str, Any]]) -> bool:
+    return any(str(ev.get("evidence_type", "")).strip() == "party_search" for ev in evidences)
+
+
+def _mentions_party_search_failure(justification: str) -> bool:
+    lowered = justification.lower()
+    required_markers = ("party", "final")
+    failure_markers = ("introuv", "not found", "unresolved", "search", "recherche")
+    return all(marker in lowered for marker in required_markers) and any(marker in lowered for marker in failure_markers)
+
+
 @tool(
     "submit_resolution",
     "Soumet une resolution pour un service. Le service_id doit exister dans "
@@ -128,9 +143,10 @@ async def submit_resolution(args: dict[str, Any]) -> dict[str, Any]:
             )
 
         # Evidence quality gates
-        ev_types = set(ev.get("evidence_type", "unknown") for ev in evidences)
+        ev_types = _distinct_evidence_types(evidences)
         ev_scores = [ev.get("score", 0) for ev in evidences]
         avg_score = sum(ev_scores) / len(ev_scores) if ev_scores else 0
+        party_final_id = str(resolution.get("party_final_id") or "").strip()
 
         if confidence == "high":
             if len(ev_types) < 2:
@@ -143,6 +159,8 @@ async def submit_resolution(args: dict[str, Any]) -> dict[str, Any]:
                     f"ERROR: confidence='high' requires average evidence score >= 60, "
                     f"got {avg_score:.0f}."
                 )
+            if not party_final_id:
+                return _text("ERROR: confidence='high' requires a non-empty party_final_id.")
         elif confidence == "medium":
             if len(ev_types) < 2:
                 return _text(
@@ -153,6 +171,8 @@ async def submit_resolution(args: dict[str, Any]) -> dict[str, Any]:
                 return _text(
                     "ERROR: confidence='medium' requires at least 1 evidence with score >= 50."
                 )
+            if not party_final_id:
+                return _text("ERROR: confidence='medium' requires a non-empty party_final_id.")
         elif confidence == "low":
             if not any(s > 0 for s in ev_scores):
                 return _text(
@@ -162,6 +182,13 @@ async def submit_resolution(args: dict[str, Any]) -> dict[str, Any]:
         justification = resolution.get("justification", "").strip()
         if not justification:
             return _text("ERROR: justification is required.")
+        if not party_final_id and not (
+            _has_party_search_evidence(evidences) or _mentions_party_search_failure(justification)
+        ):
+            return _text(
+                "ERROR: resolutions without party_final_id require a party_search evidence "
+                "or an explicit justification describing the unsuccessful final party search."
+            )
 
         resolution_id = _safe_hash([service_id, datetime.now().isoformat()])
 
@@ -181,7 +208,7 @@ async def submit_resolution(args: dict[str, Any]) -> dict[str, Any]:
                 resolution.get("network_support_id"),
                 resolution.get("optical_support_ref"),
                 resolution.get("party_final"),
-                resolution.get("party_final_id"),
+                party_final_id or None,
                 justification,
                 len(evidences),
             ),
@@ -252,10 +279,26 @@ async def validate_resolution(args: dict[str, Any]) -> dict[str, Any]:
         checks: list[str] = []
         warnings: list[str] = []
         errors: list[str] = []
+        evidence_rows = con.execute(
+            """
+            SELECT evidence_type, score
+            FROM agent_evidence
+            WHERE resolution_id = ?
+            """,
+            (res["resolution_id"],),
+        ).fetchall()
+        evidence_types = {row["evidence_type"] for row in evidence_rows}
 
         # Anti self-loop: site_a must differ from site_z
         if res["site_a"] and res["site_z"] and res["site_a"].strip().upper() == res["site_z"].strip().upper():
             errors.append(f"site_a and site_z are identical ('{res['site_a']}') — self-loop")
+
+        if not (res["party_final_id"] or "").strip():
+            warnings.append("party_final_id missing — final party unresolved after investigation")
+            if res["confidence"] in {"high", "medium"}:
+                warnings.append(
+                    f"confidence='{res['confidence']}' cannot be auto-validated without party_final_id"
+                )
 
         # Validate site_a via validation_lib
         if res["site_a"]:
@@ -315,6 +358,12 @@ async def validate_resolution(args: dict[str, Any]) -> dict[str, Any]:
                 checks.append(f"party '{res['party_final_id']}' ({party['canonical_name']}) found")
             else:
                 warnings.append(f"party_final_id '{res['party_final_id']}' NOT found in party_master")
+
+        if res["confidence"] == "low":
+            if (res["evidence_count"] or 0) < 2:
+                warnings.append("low confidence with fewer than 2 evidences cannot be auto-validated")
+            if (res["evidence_count"] or 0) == 1 and evidence_types == {"party"}:
+                warnings.append("low confidence with a single party evidence cannot be auto-validated")
 
         # Decide validation status
         if errors:

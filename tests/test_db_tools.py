@@ -13,6 +13,7 @@ _query_db = db_tools.query_db.handler
 _list_tables = db_tools.list_tables.handler
 _describe_table = db_tools.describe_table.handler
 _fetch_ctx = db_tools.fetch_service_context.handler
+_resolve_party = db_tools.resolve_party_candidates.handler
 
 
 def _run(coro):
@@ -85,13 +86,32 @@ class TestFetchServiceContext:
     def test_returns_expected_structure(self):
         result = _run(_fetch_ctx({"service_id": "SVC-001"}))
         text = result["content"][0]["text"]
-        assert "evidences" in text
+        assert "pipeline_evidences" in text
         assert "review_items" in text
-        assert "top_sites" in text
-        assert "parties" in text
+        assert "party_rows" in text
+        assert "endpoint_rows" in text
+        assert "network_support_rows" in text
+        assert "optical_support_rows" in text
+        assert "gold_row" in text
+        assert "service" in text
 
     def test_missing_service_returns_empty(self):
         result = _run(_fetch_ctx({"service_id": "NONEXISTENT"}))
         text = result["content"][0]["text"]
-        # Should return valid JSON with empty lists
-        assert "evidences" in text
+        assert '"service": null' in text
+        assert "pipeline_evidences" in text
+
+
+class TestResolvePartyCandidates:
+    def test_prefers_pipeline_final_party(self):
+        result = _run(_resolve_party({"service_id": "SVC-001"}))
+        text = result["content"][0]["text"]
+        assert '"recommended_final_party_id": "P-ACME"' in text
+        assert '"recommendation_confidence": "high"' in text
+
+    def test_uses_client_final_alias_before_contract_party(self):
+        result = _run(_resolve_party({"service_id": "SVC-002"}))
+        text = result["content"][0]["text"]
+        assert '"pipeline_contract_parties"' in text
+        assert '"recommended_final_party_id": "P-ACME"' in text
+        assert '"reason": "exact alias match on client_final_raw"' in text

@@ -112,18 +112,37 @@ def realistic_db(tmp_path: Path) -> Path:
     ])
 
     # --- party_master + party_alias ---
-    con.execute("CREATE TABLE party_master (party_id TEXT PRIMARY KEY, canonical_name TEXT)")
-    con.executemany("INSERT INTO party_master VALUES (?, ?)", [
-        ("P-ACME", "ACME Corp"),
-        ("P-GLOBEX", "Globex Inc"),
-        ("P-INITECH", "Initech SA"),
+    con.execute("""
+        CREATE TABLE party_master (
+            party_id TEXT PRIMARY KEY,
+            canonical_name TEXT,
+            normalized_name TEXT,
+            party_type TEXT,
+            source_priority INTEGER
+        )
+    """)
+    con.executemany("INSERT INTO party_master VALUES (?, ?, ?, ?, ?)", [
+        ("P-ACME", "ACME Corp", "ACME CORP", "customer", 1),
+        ("P-GLOBEX", "Globex Inc", "GLOBEX INC", "customer", 1),
+        ("P-INITECH", "Initech SA", "INITECH SA", "customer", 1),
     ])
 
-    con.execute("CREATE TABLE party_alias (alias TEXT, party_id TEXT)")
-    con.executemany("INSERT INTO party_alias VALUES (?, ?)", [
-        ("ACME", "P-ACME"),
-        ("GLOBEX", "P-GLOBEX"),
-        ("INITECH", "P-INITECH"),
+    con.execute("""
+        CREATE TABLE party_alias (
+            alias_id TEXT PRIMARY KEY,
+            party_id TEXT,
+            alias_value TEXT,
+            normalized_alias TEXT,
+            source_table TEXT,
+            source_key TEXT
+        )
+    """)
+    con.executemany("INSERT INTO party_alias VALUES (?, ?, ?, ?, ?, ?)", [
+        ("A-ACME", "P-ACME", "ACME", "ACME", "lea_active_lines", "ACME"),
+        ("A-ACME-CORP", "P-ACME", "ACME Corp", "ACME CORP", "lea_active_lines", "ACME Corp"),
+        ("A-GLOBEX", "P-GLOBEX", "GLOBEX", "GLOBEX", "lea_active_lines", "GLOBEX"),
+        ("A-GLOBEX-INC", "P-GLOBEX", "Globex Inc", "GLOBEX INC", "lea_active_lines", "Globex Inc"),
+        ("A-INITECH", "P-INITECH", "INITECH", "INITECH", "lea_active_lines", "INITECH"),
     ])
 
     # --- service_match_evidence ---
@@ -202,7 +221,9 @@ def realistic_db(tmp_path: Path) -> Path:
     con.executemany(
         "INSERT INTO service_party VALUES (?, ?, ?, ?, ?)",
         [
-            ("SVC-001", "client_final", "P-ACME", "alias", 90),
+            ("SVC-001", "final_party", "P-ACME", "alias", 90),
+            ("SVC-001", "contract_party", "P-ACME", "alias", 90),
+            ("SVC-002", "contract_party", "P-ACME", "alias", 90),
         ],
     )
 
@@ -214,6 +235,13 @@ def realistic_db(tmp_path: Path) -> Path:
             interface_name TEXT
         )
     """)
+    con.executemany(
+        "INSERT INTO service_support_reseau VALUES (?, ?, ?)",
+        [
+            ("SVC-001", "par1-co-1", "Gi0/0/1"),
+            ("SVC-003", "mar1-sec-1", "Gi0/1/0"),
+        ],
+    )
 
     # --- service_support_optique ---
     con.execute("""
@@ -223,6 +251,13 @@ def realistic_db(tmp_path: Path) -> Path:
             support_ref TEXT
         )
     """)
+    con.executemany(
+        "INSERT INTO service_support_optique VALUES (?, ?, ?)",
+        [
+            ("SVC-001", "route", "ROUTE-PN-LS"),
+            ("SVC-004", "route", "ROUTE-ME-NO"),
+        ],
+    )
 
     con.commit()
     con.close()

@@ -47,8 +47,29 @@ def db(tmp_path):
     con.execute("CREATE TABLE ref_network_devices (device_name TEXT PRIMARY KEY)")
     con.execute("CREATE TABLE ref_network_interfaces (device_name TEXT, interface_name TEXT)")
     con.execute("CREATE TABLE ref_routes (route_id TEXT PRIMARY KEY, route_ref TEXT)")
-    con.execute("CREATE TABLE party_master (party_id TEXT PRIMARY KEY, canonical_name TEXT)")
-    con.execute("INSERT INTO party_master VALUES ('P1', 'ACME Corp')")
+    con.execute("""
+        CREATE TABLE party_master (
+            party_id TEXT PRIMARY KEY,
+            canonical_name TEXT,
+            normalized_name TEXT,
+            party_type TEXT,
+            source_priority INTEGER
+        )
+    """)
+    con.execute("INSERT INTO party_master VALUES ('P1', 'ACME Corp', 'ACME CORP', 'customer', 1)")
+    con.execute("""
+        CREATE TABLE agent_evidence (
+            evidence_id TEXT PRIMARY KEY,
+            resolution_id TEXT NOT NULL,
+            service_id TEXT NOT NULL,
+            evidence_type TEXT NOT NULL,
+            source_table TEXT,
+            source_key TEXT,
+            description TEXT NOT NULL,
+            score INTEGER DEFAULT 0,
+            payload_json TEXT
+        )
+    """)
 
     con.commit()
     con.close()
@@ -84,7 +105,7 @@ def test_high_confidence_requires_2_evidence_types(db):
     }))
     text = result["content"][0]["text"]
     assert "ERROR" in text
-    assert "distinct evidence_types" in text
+    assert "party_final_id" in text or "distinct evidence_types" in text
 
 
 def test_high_confidence_requires_avg_score_60(db):
@@ -110,7 +131,7 @@ def test_high_confidence_passes(db):
     ]
     result = _run(_submit({
         "service_id": "SVC-001",
-        "resolution_json": _make_resolution("high", evidences),
+        "resolution_json": _make_resolution("high", evidences, party_final_id="P1"),
     }))
     text = result["content"][0]["text"]
     assert "Resolution submitted" in text
@@ -127,7 +148,7 @@ def test_medium_confidence_requires_2_evidence_types(db):
     }))
     text = result["content"][0]["text"]
     assert "ERROR" in text
-    assert "distinct evidence_types" in text
+    assert "party_final_id" in text or "distinct evidence_types" in text
 
 
 def test_medium_confidence_requires_score_50(db):
@@ -151,7 +172,7 @@ def test_medium_confidence_passes(db):
     ]
     result = _run(_submit({
         "service_id": "SVC-001",
-        "resolution_json": _make_resolution("medium", evidences),
+        "resolution_json": _make_resolution("medium", evidences, party_final_id="P1"),
     }))
     text = result["content"][0]["text"]
     assert "Resolution submitted" in text
@@ -176,10 +197,39 @@ def test_low_confidence_passes(db):
     ]
     result = _run(_submit({
         "service_id": "SVC-001",
-        "resolution_json": _make_resolution("low", evidences),
+        "resolution_json": _make_resolution(
+            "low",
+            [{"evidence_type": "party_search", "description": "party lookup exhausted", "score": 10}],
+            justification="final party search attempted but unresolved",
+        ),
     }))
     text = result["content"][0]["text"]
     assert "Resolution submitted" in text
+
+
+def test_medium_confidence_requires_party_final_id(db):
+    evidences = [
+        {"evidence_type": "site_match", "description": "d1", "score": 55},
+        {"evidence_type": "device_match", "description": "d2", "score": 52},
+    ]
+    result = _run(_submit({
+        "service_id": "SVC-001",
+        "resolution_json": _make_resolution("medium", evidences),
+    }))
+    text = result["content"][0]["text"]
+    assert "party_final_id" in text
+
+
+def test_low_without_party_final_requires_search_evidence_or_explanation(db):
+    evidences = [
+        {"evidence_type": "site_match", "description": "d1", "score": 15},
+    ]
+    result = _run(_submit({
+        "service_id": "SVC-001",
+        "resolution_json": _make_resolution("low", evidences, justification="weak low without party context"),
+    }))
+    text = result["content"][0]["text"]
+    assert "party_search" in text
 
 
 def test_self_loop_rejected(db):
@@ -193,6 +243,7 @@ def test_self_loop_rejected(db):
         "resolution_json": _make_resolution(
             "high", evidences,
             site_a="Paris Nord", site_z="Paris Nord",
+            party_final_id="P1",
         ),
     }))
     assert "Resolution submitted" in result["content"][0]["text"]
@@ -216,10 +267,51 @@ def test_needs_review_on_single_warning(db):
             "high", evidences,
             site_a="Paris Nord",
             site_z="Unknown City Y",
+            party_final_id="P1",
         ),
     }))
     assert "Resolution submitted" in result["content"][0]["text"]
 
     result = _run(_validate({"service_id": "SVC-001"}))
     text = result["content"][0]["text"]
+    assert "needs_review" in text
+
+
+def test_low_single_party_evidence_becomes_needs_review(db):
+    evidences = [
+        {"evidence_type": "party", "description": "contract party only", "score": 100},
+    ]
+    result = _run(_submit({
+        "service_id": "SVC-001",
+        "resolution_json": _make_resolution(
+            "low",
+            evidences,
+            justification="final party search attempted but unresolved after contract party lookup",
+        ),
+    }))
+    assert "Resolution submitted" in result["content"][0]["text"]
+
+    result = _run(_validate({"service_id": "SVC-001"}))
+    text = result["content"][0]["text"]
+    assert "needs_review" in text
+
+
+def test_missing_party_final_becomes_needs_review(db):
+    evidences = [
+        {"evidence_type": "site_match", "description": "d1", "score": 20},
+        {"evidence_type": "party_search", "description": "final party unresolved", "score": 10},
+    ]
+    result = _run(_submit({
+        "service_id": "SVC-001",
+        "resolution_json": _make_resolution(
+            "low",
+            evidences,
+            justification="final party search unresolved after checking aliases and pipeline parties",
+        ),
+    }))
+    assert "Resolution submitted" in result["content"][0]["text"]
+
+    result = _run(_validate({"service_id": "SVC-001"}))
+    text = result["content"][0]["text"]
+    assert "party_final_id missing" in text
     assert "needs_review" in text

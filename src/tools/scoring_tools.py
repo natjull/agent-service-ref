@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
+import unicodedata
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import tool
+from ..sdk_compat import tool
 
 _db_path: Path | None = None
 
@@ -27,6 +29,43 @@ def _connect() -> sqlite3.Connection:
 
 def _text(content: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": content}]}
+
+
+def _party_role_query() -> str:
+    return "role_name IN ('client_final', 'final_party')"
+
+
+def _normalized_status(status: str) -> str:
+    if status == "validated_with_warnings":
+        return "needs_review (legacy)"
+    return status
+
+
+def _normalize_alias(value: object) -> str:
+    text = "" if value is None else str(value)
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.upper()
+    text = re.sub(r"[^A-Z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _count_alias_direct_matches(con: sqlite3.Connection) -> int:
+    alias_rows = con.execute("SELECT normalized_alias FROM party_alias").fetchall()
+    normalized_aliases = {row["normalized_alias"] for row in alias_rows if row["normalized_alias"]}
+    service_rows = con.execute(
+        """
+        SELECT DISTINCT sm.service_id, sm.principal_client
+        FROM agent_resolutions ar
+        JOIN service_master_active sm ON sm.service_id = ar.service_id
+        WHERE ar.party_final_id IS NULL OR TRIM(ar.party_final_id) = ''
+        """
+    ).fetchall()
+    return sum(
+        1
+        for row in service_rows
+        if _normalize_alias(row["principal_client"]) in normalized_aliases
+    )
 
 
 def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
@@ -71,19 +110,65 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
             by_status = {}
             for r in res_stats:
                 by_confidence[r["confidence"]] = by_confidence.get(r["confidence"], 0) + r["c"]
-                by_status[r["status"]] = by_status.get(r["status"], 0) + r["c"]
+                status_key = _normalized_status(r["status"])
+                by_status[status_key] = by_status.get(status_key, 0) + r["c"]
+
+            proposed = con.execute(
+                "SELECT COUNT(*) c FROM agent_resolutions WHERE status = 'proposed'"
+            ).fetchone()["c"]
+            missing_party = con.execute(
+                """
+                SELECT COUNT(*) c
+                FROM agent_resolutions
+                WHERE party_final_id IS NULL OR TRIM(party_final_id) = ''
+                """
+            ).fetchone()["c"]
+            medium_high_missing_party = con.execute(
+                """
+                SELECT COUNT(*) c
+                FROM agent_resolutions
+                WHERE confidence IN ('medium', 'high')
+                  AND (party_final_id IS NULL OR TRIM(party_final_id) = '')
+                """
+            ).fetchone()["c"]
+            low_one_evidence = con.execute(
+                """
+                SELECT COUNT(*) c
+                FROM agent_resolutions
+                WHERE confidence = 'low' AND evidence_count = 1
+                """
+            ).fetchone()["c"]
+            low_one_party_only = con.execute(
+                """
+                SELECT COUNT(*) c
+                FROM agent_resolutions ar
+                WHERE ar.confidence = 'low'
+                  AND ar.evidence_count = 1
+                  AND EXISTS (
+                      SELECT 1
+                      FROM agent_evidence ae
+                      WHERE ae.resolution_id = ar.resolution_id
+                        AND ae.evidence_type = 'party'
+                  )
+                """
+            ).fetchone()["c"]
 
             lines.append(f"\n AGENT RESOLUTIONS: {total_resolved}")
             for conf in ("high", "medium", "low"):
                 if conf in by_confidence:
                     lines.append(f"   {conf}: {by_confidence[conf]}")
-            for st, cnt in by_status.items():
+            for st, cnt in sorted(by_status.items()):
                 lines.append(f"   status={st}: {cnt}")
 
             remaining = total - total_resolved
             lines.append(f"\n NON TRAITES: {remaining}")
             coverage = total_resolved / total * 100 if total > 0 else 0
             lines.append(f" COUVERTURE AGENT: {coverage:.1f}%")
+            lines.append(f" PROPOSED RESTANTS: {proposed}")
+            lines.append(f" PARTY_FINAL ABSENT: {missing_party}")
+            lines.append(f" MEDIUM/HIGH SANS PARTY_FINAL: {medium_high_missing_party}")
+            lines.append(f" LOW A 1 EVIDENCE: {low_one_evidence}")
+            lines.append(f" LOW A 1 EVIDENCE PARTY ONLY: {low_one_party_only}")
 
             # Auto-valid confirmations
             confirmed = con.execute(
@@ -103,7 +188,7 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
             ("Support reseau", "SELECT COUNT(DISTINCT service_id) c FROM service_support_reseau"),
             ("Route optique", "SELECT COUNT(DISTINCT service_id) c FROM service_support_optique WHERE support_type = 'route'"),
             ("Lease optique", "SELECT COUNT(DISTINCT service_id) c FROM service_support_optique WHERE support_type = 'lease'"),
-            ("Party final", "SELECT COUNT(DISTINCT service_id) c FROM service_party WHERE role_name = 'client_final'"),
+            ("Party final", f"SELECT COUNT(DISTINCT service_id) c FROM service_party WHERE {_party_role_query()}"),
         ]
         for label, sql in axes:
             try:
@@ -137,6 +222,8 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
                 lines.extend(_focus_unresolved(con))
             elif focus == "auto_valid":
                 lines.extend(_focus_auto_valid(con))
+            elif focus == "party_gaps":
+                lines.extend(_focus_party_gaps(con))
 
         # Top clients remaining
         lines.append(f"\n TOP CLIENTS RESTANTS:")
@@ -255,6 +342,46 @@ def _focus_auto_valid(con: sqlite3.Connection) -> list[str]:
     return lines
 
 
+def _focus_party_gaps(con: sqlite3.Connection) -> list[str]:
+    lines: list[str] = []
+    rows = con.execute(
+        """
+        SELECT ar.service_id, ar.confidence, ar.status,
+               sm.principal_client, sm.client_final,
+               EXISTS(
+                   SELECT 1 FROM service_party sp
+                   WHERE sp.service_id = ar.service_id AND sp.role_name = 'final_party' AND sp.party_id IS NOT NULL
+               ) AS has_pipeline_final_party,
+               EXISTS(
+                   SELECT 1 FROM party_alias pa
+                   WHERE pa.alias_value = sm.principal_client
+               ) AS has_principal_alias
+        FROM agent_resolutions ar
+        JOIN service_master_active sm ON sm.service_id = ar.service_id
+        WHERE ar.party_final_id IS NULL OR TRIM(ar.party_final_id) = ''
+        ORDER BY has_pipeline_final_party DESC, ar.confidence, ar.status, ar.service_id
+        LIMIT 50
+        """
+    ).fetchall()
+    lines.append(f" {len(rows)} services avec gap party (max 50):")
+    for row in rows:
+        reasons = []
+        if row["has_pipeline_final_party"]:
+            reasons.append("pipeline_final_party")
+        if row["client_final"]:
+            reasons.append("client_final_raw")
+        if row["has_principal_alias"]:
+            reasons.append("principal_alias")
+        reason_text = ",".join(reasons) if reasons else "no_direct_candidate"
+        lines.append(
+            f"   {row['service_id']} | {row['principal_client']} | "
+            f"{row['confidence']}/{_normalized_status(row['status'])} | {reason_text}"
+        )
+    alias_direct_matches = _count_alias_direct_matches(con)
+    lines.append(f" alias_matches_principal_client: {alias_direct_matches}")
+    return lines
+
+
 @tool(
     "get_review_queue_summary",
     "Resume de la review queue : review_types groupes par nature_service et "
@@ -323,7 +450,7 @@ async def get_review_queue_summary(args: dict[str, Any]) -> dict[str, Any]:
     "du pipeline, couverture par axe (site, reseau, optique, party), "
     "top clients restants. "
     "Focus optionnel: 'client:ADISTA', 'nature:Lan To Lan', "
-    "'unresolved', 'auto_valid'.",
+    "'unresolved', 'auto_valid', 'party_gaps'.",
     {"focus": str},
 )
 async def reconciliation_scorecard(args: dict[str, Any]) -> dict[str, Any]:

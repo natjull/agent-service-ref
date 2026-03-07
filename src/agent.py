@@ -5,23 +5,22 @@ from __future__ import annotations
 import asyncio
 import os
 
-from claude_agent_sdk import (
+from .sdk_compat import (
     AgentDefinition,
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    MessageParseError,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ToolUseBlock,
     create_sdk_mcp_server,
+    message_parser,
 )
-from claude_agent_sdk._errors import MessageParseError
 
 # --- Patch Claude SDK message parser to prevent stream crash on unknown events ---
-import claude_agent_sdk._internal.message_parser as _mp
-from claude_agent_sdk.types import SystemMessage
-
-_orig_parse = _mp.parse_message
+_orig_parse = message_parser.parse_message
 
 
 def _safe_parse(data):
@@ -33,7 +32,7 @@ def _safe_parse(data):
         raise e
 
 
-_mp.parse_message = _safe_parse
+message_parser.parse_message = _safe_parse
 # ---------------------------------------------------------------------------------
 
 from pathlib import Path
@@ -45,7 +44,13 @@ from rich.status import Status
 
 from .prompts.system_prompt import build_system_prompt
 from .tools import db_tools, config_tools, resolution_tools, scoring_tools
-from .tools.db_tools import query_db, list_tables, describe_table, fetch_service_context
+from .tools.db_tools import (
+    query_db,
+    list_tables,
+    describe_table,
+    fetch_service_context,
+    resolve_party_candidates,
+)
 from .tools.config_tools import search_configs, read_config_file
 from .tools.resolution_tools import submit_resolution, validate_resolution, list_resolutions
 from .tools.scoring_tools import reconciliation_scorecard, get_review_queue_summary
@@ -63,6 +68,8 @@ def create_service_ref_server():
             query_db,
             list_tables,
             describe_table,
+            fetch_service_context,
+            resolve_party_candidates,
             # Config tools
             search_configs,
             read_config_file,
@@ -73,8 +80,6 @@ def create_service_ref_server():
             # Scoring tools
             reconciliation_scorecard,
             get_review_queue_summary,
-            # Context tool
-            fetch_service_context,
         ],
     )
 
@@ -120,6 +125,8 @@ def create_agent_options(
             "mcp__service-ref__query_db",
             "mcp__service-ref__list_tables",
             "mcp__service-ref__describe_table",
+            "mcp__service-ref__fetch_service_context",
+            "mcp__service-ref__resolve_party_candidates",
             "mcp__service-ref__search_configs",
             "mcp__service-ref__read_config_file",
             "mcp__service-ref__submit_resolution",
@@ -127,7 +134,6 @@ def create_agent_options(
             "mcp__service-ref__list_resolutions",
             "mcp__service-ref__reconciliation_scorecard",
             "mcp__service-ref__get_review_queue_summary",
-            "mcp__service-ref__fetch_service_context",
         ],
         disallowed_tools=[
             "Bash",
@@ -183,6 +189,8 @@ def _tool_summary(block: ToolUseBlock) -> str:
         return f"submit_resolution — {inp.get('service_id', '?')}"
     elif name == "validate_resolution":
         return f"validate_resolution — {inp.get('service_id', '?')}"
+    elif name == "resolve_party_candidates":
+        return f"resolve_party_candidates — {inp.get('service_id', '?')}"
     else:
         first_val = next(iter(inp.values()), "") if inp else ""
         return f"{name} — {str(first_val)[:50]}"
