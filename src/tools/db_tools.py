@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-import unicodedata
 from pathlib import Path
 from typing import Any
 
 from ..sdk_compat import tool
+from .text_utils import normalize_alias
 
 _db_path: Path | None = None
 
@@ -56,15 +56,6 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     return [_row_to_dict(row) for row in rows if row is not None]
-
-
-def _normalize_alias(value: object) -> str:
-    text = "" if value is None else str(value)
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.upper()
-    text = re.sub(r"[^A-Z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
 
 
 def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
@@ -207,7 +198,7 @@ def _resolve_party_candidates(con: sqlite3.Connection, service_id: str) -> dict[
     ).fetchall()
 
     def alias_matches(raw_value: object) -> list[dict[str, Any]]:
-        normalized = _normalize_alias(raw_value)
+        normalized = normalize_alias(raw_value)
         if not normalized:
             return []
         rows = con.execute(
@@ -432,6 +423,29 @@ async def fetch_service_context(args: dict[str, Any]) -> dict[str, Any]:
     try:
         ctx = _fetch_service_bundle(con, service_id)
         return _text(json.dumps(ctx, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "get_service_decision_pack",
+    "Retourne en un seul appel le contexte complet d'un service et "
+    "les candidats deterministes pour party_final. A privilegier comme "
+    "point d'entree nominal avant exploration libre.",
+    {"service_id": str},
+)
+async def get_service_decision_pack(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _fetch_service_bundle(con, service_id)
+        payload["party_candidates"] = _resolve_party_candidates(con, service_id)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     except Exception as e:
         return _text(f"ERROR: {e}")
     finally:

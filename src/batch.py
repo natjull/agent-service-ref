@@ -26,14 +26,22 @@ def _count_proposed(db_path: Path) -> int | None:
         con.close()
 
 
-async def batch_run(prompt: str, workspace: str = "."):
+async def batch_run(prompt: str, workspace: str = ".", model: str = "opus") -> tuple[float, int]:
     """Run a single batch prompt and print results."""
-    options = create_agent_options(workspace=workspace)
+    options = create_agent_options(workspace=workspace, model=model)
     db_path = Path(workspace).resolve() / "service_ref" / "output" / "service_referential.sqlite"
+    total_cost_usd = 0.0
+    total_turns = 0
 
     async with ClaudeSDKClient(options=options) as client:
         await client.query(prompt)
-        text_blocks, hit_max_turns = await _process_stream(client, rich_console=None, spinner=False)
+        text_blocks, hit_max_turns, cost, turns = await _process_stream(
+            client,
+            rich_console=None,
+            spinner=False,
+        )
+        total_cost_usd += cost
+        total_turns += turns
 
         # Print any remaining text blocks (not already flushed by rich console)
         for text in text_blocks:
@@ -44,7 +52,13 @@ async def batch_run(prompt: str, workspace: str = "."):
         while hit_max_turns and auto_continue_count < max_auto_continue:
             auto_continue_count += 1
             await client.query("continue")
-            text_blocks, hit_max_turns = await _process_stream(client, rich_console=None, spinner=False)
+            text_blocks, hit_max_turns, cost, turns = await _process_stream(
+                client,
+                rich_console=None,
+                spinner=False,
+            )
+            total_cost_usd += cost
+            total_turns += turns
             for text in text_blocks:
                 print(text)
 
@@ -56,10 +70,18 @@ async def batch_run(prompt: str, workspace: str = "."):
             await client.query(
                 "Avant de terminer, liste les resolutions proposed et valide chacune d'elles."
             )
-            text_blocks, _ = await _process_stream(client, rich_console=None, spinner=False)
+            text_blocks, _, cost, turns = await _process_stream(
+                client,
+                rich_console=None,
+                spinner=False,
+            )
+            total_cost_usd += cost
+            total_turns += turns
             for text in text_blocks:
                 print(text)
 
         proposed_count = _count_proposed(db_path)
         if proposed_count:
             print(f"[WARNING] {proposed_count} resolution(s) still in proposed status after batch run.")
+
+    return total_cost_usd, total_turns

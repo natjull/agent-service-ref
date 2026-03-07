@@ -401,6 +401,23 @@ async def validate_resolution(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "submit_and_validate",
+    "Soumet puis valide immediatement une resolution pour un service. "
+    "Si la soumission echoue, la validation n'est pas lancee.",
+    {"service_id": str, "resolution_json": str},
+)
+async def submit_and_validate(args: dict[str, Any]) -> dict[str, Any]:
+    submit_result = await submit_resolution.handler(args)
+    submit_text = submit_result["content"][0]["text"]
+    if "ERROR:" in submit_text:
+        return submit_result
+
+    validate_result = await validate_resolution.handler({"service_id": args.get("service_id", "")})
+    validate_text = validate_result["content"][0]["text"]
+    return _text(f"{submit_text}\n\n---\n\n{validate_text}")
+
+
+@tool(
     "list_resolutions",
     "Liste les resolutions soumises par l'agent. "
     "Filtres optionnels par client, nature de service, ou status.",

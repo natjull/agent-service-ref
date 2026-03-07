@@ -28,11 +28,20 @@ def main():
     # interactive
     p_inter = sub.add_parser("interactive", help="Mode interactif avec l'agent")
     p_inter.add_argument("--workspace", "-w", default=".", help="Repertoire de travail")
+    p_inter.add_argument("--model", "-m", choices=["opus", "sonnet"], default="opus")
 
     # batch
     p_batch = sub.add_parser("batch", help="Execution non-interactive d'un prompt")
     p_batch.add_argument("--workspace", "-w", default=".", help="Repertoire de travail")
+    p_batch.add_argument("--model", "-m", choices=["opus", "sonnet"], default="opus")
     p_batch.add_argument("--prompt", "-p", required=True, help="Prompt a executer")
+
+    # benchmark
+    p_benchmark = sub.add_parser("benchmark", help="Compare plusieurs modeles sur un meme lot")
+    p_benchmark.add_argument("--workspace", "-w", default=".", help="Repertoire de travail")
+    p_benchmark.add_argument("--lot-sql", required=True, help="SQL retournant exactement une colonne service_id")
+    p_benchmark.add_argument("--models", default="opus,sonnet", help="Liste de modeles separes par des virgules")
+    p_benchmark.add_argument("--output", "-o", default=None, help="Chemin JSON de sortie optionnel")
 
     # baseline
     p_baseline = sub.add_parser("baseline", help="Compare les resolutions agent aux auto_valid du pipeline")
@@ -44,10 +53,27 @@ def main():
         _prepare(args.workspace, rebuild=args.rebuild)
     elif args.command == "interactive":
         from .agent import interactive_session
-        asyncio.run(interactive_session(workspace=args.workspace))
+        asyncio.run(interactive_session(workspace=args.workspace, model=args.model))
     elif args.command == "batch":
         from .batch import batch_run
-        asyncio.run(batch_run(args.prompt, workspace=args.workspace))
+        asyncio.run(batch_run(args.prompt, workspace=args.workspace, model=args.model))
+    elif args.command == "benchmark":
+        from .benchmark import run_benchmark
+
+        models = [model.strip() for model in args.models.split(",") if model.strip()]
+        invalid = [model for model in models if model not in {"opus", "sonnet"}]
+        if invalid:
+            parser.error(f"Modeles invalides: {', '.join(invalid)}. Choix autorises: opus, sonnet.")
+        if not models:
+            parser.error("Au moins un modele doit etre fourni via --models.")
+        asyncio.run(
+            run_benchmark(
+                lot_sql=args.lot_sql,
+                models=models,
+                workspace=args.workspace,
+                output_path=args.output,
+            )
+        )
     elif args.command == "baseline":
         _baseline(args.workspace)
 

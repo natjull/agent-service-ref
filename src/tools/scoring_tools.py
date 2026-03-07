@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import re
 import sqlite3
-import unicodedata
 from pathlib import Path
 from typing import Any
 
 from ..sdk_compat import tool
+from .text_utils import normalize_alias
 
 _db_path: Path | None = None
 
@@ -41,15 +40,6 @@ def _normalized_status(status: str) -> str:
     return status
 
 
-def _normalize_alias(value: object) -> str:
-    text = "" if value is None else str(value)
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.upper()
-    text = re.sub(r"[^A-Z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
 def _count_alias_direct_matches(con: sqlite3.Connection) -> int:
     alias_rows = con.execute("SELECT normalized_alias FROM party_alias").fetchall()
     normalized_aliases = {row["normalized_alias"] for row in alias_rows if row["normalized_alias"]}
@@ -64,8 +54,14 @@ def _count_alias_direct_matches(con: sqlite3.Connection) -> int:
     return sum(
         1
         for row in service_rows
-        if _normalize_alias(row["principal_client"]) in normalized_aliases
+        if normalize_alias(row["principal_client"]) in normalized_aliases
     )
+
+
+def _is_truthy_flag(value: object) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "compact"}
 
 
 def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
@@ -253,6 +249,48 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
         con.close()
 
 
+def compute_compact_scorecard(db_path: Path) -> str:
+    con = sqlite3.connect(str(db_path))
+    con.row_factory = sqlite3.Row
+    try:
+        total = con.execute("SELECT COUNT(*) c FROM service_master_active").fetchone()["c"]
+        has_agent = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_resolutions'"
+        ).fetchone()
+        if not has_agent:
+            return f"SCORECARD: {total} svc | resolved=0 (0%) | remaining={total} | proposed=0 | high=0 med=0 low=0 | party_gaps=0"
+
+        resolved = con.execute("SELECT COUNT(*) c FROM agent_resolutions").fetchone()["c"]
+        proposed = con.execute(
+            "SELECT COUNT(*) c FROM agent_resolutions WHERE status = 'proposed'"
+        ).fetchone()["c"]
+        high = con.execute(
+            "SELECT COUNT(*) c FROM agent_resolutions WHERE confidence = 'high'"
+        ).fetchone()["c"]
+        medium = con.execute(
+            "SELECT COUNT(*) c FROM agent_resolutions WHERE confidence = 'medium'"
+        ).fetchone()["c"]
+        low = con.execute(
+            "SELECT COUNT(*) c FROM agent_resolutions WHERE confidence = 'low'"
+        ).fetchone()["c"]
+        party_gaps = con.execute(
+            """
+            SELECT COUNT(*) c
+            FROM agent_resolutions
+            WHERE party_final_id IS NULL OR TRIM(party_final_id) = ''
+            """
+        ).fetchone()["c"]
+        remaining = max(total - resolved, 0)
+        coverage = (resolved / total * 100.0) if total else 0.0
+        return (
+            f"SCORECARD: {total} svc | resolved={resolved} ({coverage:.0f}%) | "
+            f"remaining={remaining} | proposed={proposed} | "
+            f"high={high} med={medium} low={low} | party_gaps={party_gaps}"
+        )
+    finally:
+        con.close()
+
+
 def _focus_client(con: sqlite3.Connection, client: str) -> list[str]:
     lines: list[str] = []
     services = con.execute(
@@ -311,6 +349,9 @@ def _focus_unresolved(con: sqlite3.Connection) -> list[str]:
 
 def _focus_auto_valid(con: sqlite3.Connection) -> list[str]:
     lines: list[str] = []
+    has_agent = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_resolutions'"
+    ).fetchone()
     auto = con.execute(
         """SELECT g.service_id, s.principal_client, s.nature_service,
                   g.confidence_band, g.match_state
@@ -322,10 +363,6 @@ def _focus_auto_valid(con: sqlite3.Connection) -> list[str]:
 
     lines.append(f" {len(auto)} services auto-valides:")
     for s in auto:
-        # Check if agent has also resolved
-        has_agent = con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_resolutions'"
-        ).fetchone()
         agent_status = "-"
         if has_agent:
             ar = con.execute(
@@ -450,17 +487,21 @@ async def get_review_queue_summary(args: dict[str, Any]) -> dict[str, Any]:
     "du pipeline, couverture par axe (site, reseau, optique, party), "
     "top clients restants. "
     "Focus optionnel: 'client:ADISTA', 'nature:Lan To Lan', "
-    "'unresolved', 'auto_valid', 'party_gaps'.",
-    {"focus": str},
+    "'unresolved', 'auto_valid', 'party_gaps'. Mode compact optionnel.",
+    {"focus": str, "compact": str},
 )
 async def reconciliation_scorecard(args: dict[str, Any]) -> dict[str, Any]:
     focus = args.get("focus", "").strip() or None
+    compact = _is_truthy_flag(args.get("compact"))
 
     if _db_path is None or not _db_path.exists():
         return _text(f"Database not found: {_db_path}")
 
     try:
-        result = compute_scorecard(_db_path, focus=focus)
+        if compact:
+            result = compute_compact_scorecard(_db_path)
+        else:
+            result = compute_scorecard(_db_path, focus=focus)
         return _text(result)
     except Exception as e:
         return _text(f"ERROR computing scorecard: {e}")

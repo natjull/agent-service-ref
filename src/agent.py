@@ -49,10 +49,16 @@ from .tools.db_tools import (
     list_tables,
     describe_table,
     fetch_service_context,
+    get_service_decision_pack,
     resolve_party_candidates,
 )
 from .tools.config_tools import search_configs, read_config_file
-from .tools.resolution_tools import submit_resolution, validate_resolution, list_resolutions
+from .tools.resolution_tools import (
+    submit_resolution,
+    submit_and_validate,
+    validate_resolution,
+    list_resolutions,
+)
 from .tools.scoring_tools import reconciliation_scorecard, get_review_queue_summary
 
 console = Console()
@@ -69,12 +75,14 @@ def create_service_ref_server():
             list_tables,
             describe_table,
             fetch_service_context,
+            get_service_decision_pack,
             resolve_party_candidates,
             # Config tools
             search_configs,
             read_config_file,
             # Resolution tools
             submit_resolution,
+            submit_and_validate,
             validate_resolution,
             list_resolutions,
             # Scoring tools
@@ -87,6 +95,7 @@ def create_service_ref_server():
 def create_agent_options(
     workspace: str = ".",
     api_key: str = "",
+    model: str = "opus",
 ) -> ClaudeAgentOptions:
     """Build the agent configuration.
 
@@ -117,6 +126,8 @@ def create_agent_options(
     if api_key:
         agent_env["ANTHROPIC_API_KEY"] = api_key
 
+    sub_model = "sonnet" if model == "opus" else model
+
     return ClaudeAgentOptions(
         system_prompt=system_prompt,
         mcp_servers={"service-ref": server},
@@ -126,10 +137,12 @@ def create_agent_options(
             "mcp__service-ref__list_tables",
             "mcp__service-ref__describe_table",
             "mcp__service-ref__fetch_service_context",
+            "mcp__service-ref__get_service_decision_pack",
             "mcp__service-ref__resolve_party_candidates",
             "mcp__service-ref__search_configs",
             "mcp__service-ref__read_config_file",
             "mcp__service-ref__submit_resolution",
+            "mcp__service-ref__submit_and_validate",
             "mcp__service-ref__validate_resolution",
             "mcp__service-ref__list_resolutions",
             "mcp__service-ref__reconciliation_scorecard",
@@ -142,17 +155,17 @@ def create_agent_options(
             "EnterPlanMode", "ExitPlanMode",
             "WebSearch", "WebFetch",
         ],
-        model="opus",
+        model=model,
         agents={
             "general-purpose": AgentDefinition(
                 description="General-purpose agent for research and multi-step tasks",
                 prompt="",
-                model="sonnet",
+                model=sub_model,
             ),
             "Explore": AgentDefinition(
                 description="Fast agent for exploring codebases",
                 prompt="",
-                model="sonnet",
+                model=sub_model,
             ),
         },
         permission_mode="default",
@@ -185,8 +198,12 @@ def _tool_summary(block: ToolUseBlock) -> str:
         return f"query_db — {sql[:50]}{'…' if len(sql) > 50 else ''}"
     elif name == "search_configs":
         return f"search_configs — {inp.get('pattern', '?')}"
+    elif name == "get_service_decision_pack":
+        return f"get_service_decision_pack — {inp.get('service_id', '?')}"
     elif name == "submit_resolution":
         return f"submit_resolution — {inp.get('service_id', '?')}"
+    elif name == "submit_and_validate":
+        return f"submit_and_validate — {inp.get('service_id', '?')}"
     elif name == "validate_resolution":
         return f"validate_resolution — {inp.get('service_id', '?')}"
     elif name == "resolve_party_candidates":
@@ -203,17 +220,20 @@ async def _process_stream(
     client: ClaudeSDKClient,
     rich_console: Console | None = None,
     spinner: bool = True,
-) -> tuple[list[str], bool]:
+) -> tuple[list[str], bool, float, int]:
     """Process the agent response stream. Shared between interactive and batch modes.
 
     Returns:
-        (text_blocks, hit_max_turns) — collected text outputs and whether
-        the agent hit the max-turns limit.
+        (text_blocks, hit_max_turns, total_cost_usd, num_turns) — collected
+        text outputs, whether the agent hit the max-turns limit, and the
+        execution metrics exposed by the SDK result message.
     """
     text_buffer: list[str] = []
     tool_count = 0
     status: Status | None = None
     hit_max_turns = False
+    total_cost_usd = 0.0
+    num_turns = 0
 
     stream = client.receive_messages().__aiter__()
     while True:
@@ -275,6 +295,8 @@ async def _process_stream(
             cost = getattr(message, "total_cost_usd", None)
             turns = getattr(message, "num_turns", None)
             is_end = getattr(message, "is_end_turn", True)
+            total_cost_usd = float(cost or 0.0)
+            num_turns = int(turns or 0)
 
             if rich_console:
                 info_parts = []
@@ -297,16 +319,17 @@ async def _process_stream(
         _flush_text(text_buffer, rich_console)
         text_buffer.clear()
 
-    return text_buffer, hit_max_turns
+    return text_buffer, hit_max_turns, total_cost_usd, num_turns
 
 
-async def interactive_session(workspace: str = "."):
+async def interactive_session(workspace: str = ".", model: str = "opus"):
     """Run the agent in interactive conversation mode."""
-    options = create_agent_options(workspace=workspace)
+    options = create_agent_options(workspace=workspace, model=model)
 
     console.print(Panel(
         "[bold]Agent Service-Ref v0.1.0[/bold]\n"
         f"Espace de travail : [dim]{workspace}[/dim]\n"
+        f"Modele : [dim]{model}[/dim]\n"
         "Tapez [bold]quit[/bold] pour quitter.",
         border_style="cyan",
     ))
@@ -334,7 +357,11 @@ async def interactive_session(workspace: str = "."):
                     continue
 
             await client.query(user_input)
-            _, hit_max_turns = await _process_stream(client, rich_console=console, spinner=True)
+            _, hit_max_turns, _, _ = await _process_stream(
+                client,
+                rich_console=console,
+                spinner=True,
+            )
 
             if hit_max_turns:
                 next_query = "continue"

@@ -38,13 +38,17 @@ def test_batch_auto_continues_and_runs_final_sweep(monkeypatch, tmp_path, capsys
 
     fake_client = _FakeClient(options={"workspace": str(workspace)})
 
-    monkeypatch.setattr(batch, "create_agent_options", lambda workspace=".": {"workspace": workspace})
+    monkeypatch.setattr(
+        batch,
+        "create_agent_options",
+        lambda workspace=".", model="opus": {"workspace": workspace, "model": model},
+    )
     monkeypatch.setattr(batch, "ClaudeSDKClient", lambda options: fake_client)
 
     responses = iter([
-        (["first-pass"], True),
-        (["continued"], False),
-        (["final-sweep"], False),
+        (["first-pass"], True, 1.25, 3),
+        (["continued"], False, 0.75, 2),
+        (["final-sweep"], False, 0.5, 1),
     ])
 
     async def fake_process_stream(client, rich_console=None, spinner=False):
@@ -52,7 +56,9 @@ def test_batch_auto_continues_and_runs_final_sweep(monkeypatch, tmp_path, capsys
 
     monkeypatch.setattr(batch, "_process_stream", fake_process_stream)
 
-    asyncio.run(batch.batch_run("resolve services", workspace=str(workspace)))
+    total_cost, total_turns = asyncio.run(
+        batch.batch_run("resolve services", workspace=str(workspace), model="sonnet")
+    )
 
     captured = capsys.readouterr()
     assert fake_client.queries == [
@@ -63,6 +69,8 @@ def test_batch_auto_continues_and_runs_final_sweep(monkeypatch, tmp_path, capsys
     assert "first-pass" in captured.out
     assert "continued" in captured.out
     assert "final-sweep" in captured.out
+    assert total_cost == 2.5
+    assert total_turns == 6
 
 
 def test_batch_warns_if_proposed_remain(monkeypatch, tmp_path, capsys):
@@ -89,15 +97,21 @@ def test_batch_warns_if_proposed_remain(monkeypatch, tmp_path, capsys):
 
     fake_client = _FakeClient(options={"workspace": str(workspace)})
 
-    monkeypatch.setattr(batch, "create_agent_options", lambda workspace=".": {"workspace": workspace})
+    monkeypatch.setattr(
+        batch,
+        "create_agent_options",
+        lambda workspace=".", model="opus": {"workspace": workspace, "model": model},
+    )
     monkeypatch.setattr(batch, "ClaudeSDKClient", lambda options: fake_client)
 
     async def fake_process_stream(client, rich_console=None, spinner=False):
-        return (["done"], False)
+        return (["done"], False, 0.0, 0)
 
     monkeypatch.setattr(batch, "_process_stream", fake_process_stream)
 
-    asyncio.run(batch.batch_run("resolve services", workspace=str(workspace)))
+    total_cost, total_turns = asyncio.run(batch.batch_run("resolve services", workspace=str(workspace)))
 
     captured = capsys.readouterr()
     assert "still in proposed status" in captured.out
+    assert total_cost == 0.0
+    assert total_turns == 0
