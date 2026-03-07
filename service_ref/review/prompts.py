@@ -1,3 +1,5 @@
+"""DEPRECATED: This module is superseded by src/prompts/system_prompt.py. Kept for reference only."""
+
 from __future__ import annotations
 
 SYSTEM_PROMPT = """You are assisting a human telecom data analyst.

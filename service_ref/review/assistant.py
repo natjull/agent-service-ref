@@ -1,3 +1,5 @@
+"""DEPRECATED: This module is superseded by src/agent.py. Kept for reference only."""
+
 from __future__ import annotations
 
 import csv

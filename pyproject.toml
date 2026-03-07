@@ -1,0 +1,25 @@
+[project]
+name = "agent-service-ref"
+version = "0.1.0"
+description = "Agent IA autonome pour la réconciliation BSS/OSS du référentiel de services télécom"
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk>=0.1.35",
+    "openpyxl>=3.1",
+    "rich>=13.0",
+]
+
+[project.scripts]
+agent-service-ref = "src.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["src*", "service_ref*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "service_ref/tests"]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

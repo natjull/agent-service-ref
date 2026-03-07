@@ -1,0 +1,348 @@
+"""Main agent assembly: MCP server + Claude SDK client + interactive loop."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+
+from claude_agent_sdk import (
+    AgentDefinition,
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    ResultMessage,
+    TextBlock,
+    ToolUseBlock,
+    create_sdk_mcp_server,
+)
+from claude_agent_sdk._errors import MessageParseError
+
+# --- Patch Claude SDK message parser to prevent stream crash on unknown events ---
+import claude_agent_sdk._internal.message_parser as _mp
+from claude_agent_sdk.types import SystemMessage
+
+_orig_parse = _mp.parse_message
+
+
+def _safe_parse(data):
+    try:
+        return _orig_parse(data)
+    except Exception as e:
+        if data.get("type", "").endswith("_event"):
+            return SystemMessage(subtype="ignored_event", data=data)
+        raise e
+
+
+_mp.parse_message = _safe_parse
+# ---------------------------------------------------------------------------------
+
+from pathlib import Path
+
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.status import Status
+
+from .prompts.system_prompt import build_system_prompt
+from .tools import db_tools, config_tools, resolution_tools, scoring_tools
+from .tools.db_tools import query_db, list_tables, describe_table, fetch_service_context
+from .tools.config_tools import search_configs, read_config_file
+from .tools.resolution_tools import submit_resolution, validate_resolution, list_resolutions
+from .tools.scoring_tools import reconciliation_scorecard, get_review_queue_summary
+
+console = Console()
+
+
+def create_service_ref_server():
+    """Create the MCP server with all service-ref tools."""
+    return create_sdk_mcp_server(
+        name="service-ref",
+        version="1.0.0",
+        tools=[
+            # Database tools
+            query_db,
+            list_tables,
+            describe_table,
+            # Config tools
+            search_configs,
+            read_config_file,
+            # Resolution tools
+            submit_resolution,
+            validate_resolution,
+            list_resolutions,
+            # Scoring tools
+            reconciliation_scorecard,
+            get_review_queue_summary,
+            # Context tool
+            fetch_service_context,
+        ],
+    )
+
+
+def create_agent_options(
+    workspace: str = ".",
+    api_key: str = "",
+) -> ClaudeAgentOptions:
+    """Build the agent configuration.
+
+    Args:
+        workspace: Working directory (root of agent-service-ref).
+        api_key: Anthropic API key. If empty, falls back to Claude Max auth.
+    """
+    ws = Path(workspace).resolve()
+    db_path = ws / "service_ref" / "output" / "service_referential.sqlite"
+    config_dir = ws / "unzipped_equip"
+    project_context_path = ws / "project_context.md"
+
+    # Configure all tool modules
+    db_tools.configure(db_path)
+    config_tools.configure(config_dir)
+    resolution_tools.configure(db_path)
+    scoring_tools.configure(db_path)
+
+    server = create_service_ref_server()
+
+    system_prompt = build_system_prompt(
+        db_path=db_path,
+        project_context_path=project_context_path,
+    )
+
+    # Auth: if an API key is provided, pass it through.
+    agent_env: dict[str, str] = {"CLAUDECODE": ""}
+    if api_key:
+        agent_env["ANTHROPIC_API_KEY"] = api_key
+
+    return ClaudeAgentOptions(
+        system_prompt=system_prompt,
+        mcp_servers={"service-ref": server},
+        allowed_tools=[
+            "Read", "Glob", "Grep",
+            "mcp__service-ref__query_db",
+            "mcp__service-ref__list_tables",
+            "mcp__service-ref__describe_table",
+            "mcp__service-ref__search_configs",
+            "mcp__service-ref__read_config_file",
+            "mcp__service-ref__submit_resolution",
+            "mcp__service-ref__validate_resolution",
+            "mcp__service-ref__list_resolutions",
+            "mcp__service-ref__reconciliation_scorecard",
+            "mcp__service-ref__get_review_queue_summary",
+            "mcp__service-ref__fetch_service_context",
+        ],
+        disallowed_tools=[
+            "Bash",
+            "Write", "Edit",
+            "AskUserQuestion",
+            "EnterPlanMode", "ExitPlanMode",
+            "WebSearch", "WebFetch",
+        ],
+        model="opus",
+        agents={
+            "general-purpose": AgentDefinition(
+                description="General-purpose agent for research and multi-step tasks",
+                prompt="",
+                model="sonnet",
+            ),
+            "Explore": AgentDefinition(
+                description="Fast agent for exploring codebases",
+                prompt="",
+                model="sonnet",
+            ),
+        },
+        permission_mode="default",
+        max_turns=200,
+        cwd=workspace,
+        env=agent_env,
+    )
+
+
+def _tool_summary(block: ToolUseBlock) -> str:
+    """Return a human-readable one-liner for a tool call."""
+    name = block.name.replace("mcp__service-ref__", "")
+    inp = block.input if hasattr(block, "input") else {}
+    if not isinstance(inp, dict):
+        inp = {}
+
+    if name == "Bash":
+        cmd = inp.get("command", "")
+        return f"Bash — {cmd[:60]}{'…' if len(cmd) > 60 else ''}"
+    elif name in ("Read", "Write"):
+        path = inp.get("file_path", "?")
+        short = os.path.basename(path) if "/" in path else path
+        return f"{name} — {short}"
+    elif name == "Glob":
+        return f"Glob — {inp.get('pattern', '?')}"
+    elif name == "Grep":
+        return f"Grep — {inp.get('pattern', '?')}"
+    elif name == "query_db":
+        sql = inp.get("sql", "")
+        return f"query_db — {sql[:50]}{'…' if len(sql) > 50 else ''}"
+    elif name == "search_configs":
+        return f"search_configs — {inp.get('pattern', '?')}"
+    elif name == "submit_resolution":
+        return f"submit_resolution — {inp.get('service_id', '?')}"
+    elif name == "validate_resolution":
+        return f"validate_resolution — {inp.get('service_id', '?')}"
+    else:
+        first_val = next(iter(inp.values()), "") if inp else ""
+        return f"{name} — {str(first_val)[:50]}"
+
+
+_STREAM_TIMEOUT = 120  # seconds per receive_messages iteration
+
+
+async def _process_stream(
+    client: ClaudeSDKClient,
+    rich_console: Console | None = None,
+    spinner: bool = True,
+) -> tuple[list[str], bool]:
+    """Process the agent response stream. Shared between interactive and batch modes.
+
+    Returns:
+        (text_blocks, hit_max_turns) — collected text outputs and whether
+        the agent hit the max-turns limit.
+    """
+    text_buffer: list[str] = []
+    tool_count = 0
+    status: Status | None = None
+    hit_max_turns = False
+
+    stream = client.receive_messages().__aiter__()
+    while True:
+        try:
+            message = await asyncio.wait_for(stream.__anext__(), timeout=_STREAM_TIMEOUT)
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            if status is not None:
+                status.stop()
+                status = None
+            text_buffer.append(
+                "\n[Timeout: l'agent n'a pas repondu en "
+                f"{_STREAM_TIMEOUT}s. Vous pouvez continuer avec un nouveau message.]"
+            )
+            break
+        except MessageParseError:
+            continue
+
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    if status is not None:
+                        status.stop()
+                        status = None
+                        tool_count = 0
+                    text_buffer.append(block.text)
+
+                elif isinstance(block, ToolUseBlock):
+                    if rich_console and text_buffer:
+                        _flush_text(text_buffer, rich_console)
+                        text_buffer.clear()
+
+                    tool_count += 1
+                    summary = _tool_summary(block)
+
+                    if rich_console and spinner:
+                        if status is None:
+                            status = rich_console.status(
+                                f"[yellow]{summary}[/yellow]",
+                                spinner="dots",
+                                spinner_style="yellow",
+                            )
+                            status.start()
+                        else:
+                            status.update(
+                                f"[yellow]{summary}[/yellow]  [dim]({tool_count} outils)[/dim]"
+                            )
+
+        elif isinstance(message, ResultMessage):
+            if status is not None:
+                status.stop()
+                status = None
+
+            if rich_console and text_buffer:
+                _flush_text(text_buffer, rich_console)
+                text_buffer.clear()
+
+            cost = getattr(message, "total_cost_usd", None)
+            turns = getattr(message, "num_turns", None)
+            is_end = getattr(message, "is_end_turn", True)
+
+            if rich_console:
+                info_parts = []
+                if cost:
+                    info_parts.append(f"${cost:.4f}")
+                if turns:
+                    info_parts.append(f"{turns} turns")
+                if info_parts:
+                    rich_console.print(f"  [dim]{' · '.join(info_parts)}[/dim]")
+
+            if not is_end or (turns and turns >= 190):
+                hit_max_turns = True
+
+            break
+
+    if status is not None:
+        status.stop()
+
+    if rich_console and text_buffer:
+        _flush_text(text_buffer, rich_console)
+        text_buffer.clear()
+
+    return text_buffer, hit_max_turns
+
+
+async def interactive_session(workspace: str = "."):
+    """Run the agent in interactive conversation mode."""
+    options = create_agent_options(workspace=workspace)
+
+    console.print(Panel(
+        "[bold]Agent Service-Ref v0.1.0[/bold]\n"
+        f"Espace de travail : [dim]{workspace}[/dim]\n"
+        "Tapez [bold]quit[/bold] pour quitter.",
+        border_style="cyan",
+    ))
+
+    async with ClaudeSDKClient(options=options) as client:
+        next_query: str | None = None
+
+        while True:
+            if next_query is not None:
+                user_input = next_query
+                next_query = None
+                console.print("  [dim]↻ auto-continue[/dim]")
+            else:
+                try:
+                    user_input = input("\n\033[32mVous >\033[0m ")
+                except (EOFError, KeyboardInterrupt):
+                    console.print("\n[dim]Au revoir.[/dim]")
+                    break
+
+                if user_input.strip().lower() in ("quit", "exit", "q"):
+                    console.print("[dim]Au revoir.[/dim]")
+                    break
+
+                if not user_input.strip():
+                    continue
+
+            await client.query(user_input)
+            _, hit_max_turns = await _process_stream(client, rich_console=console, spinner=True)
+
+            if hit_max_turns:
+                next_query = "continue"
+
+
+def _flush_text(buffer: list[str], target_console: Console | None = None) -> None:
+    """Render accumulated agent text as markdown inside a panel."""
+    text = "\n".join(buffer)
+    if not text.strip():
+        return
+    c = target_console or console
+    c.print()
+    c.print(Panel(
+        Markdown(text),
+        title="[bold cyan]Agent[/bold cyan]",
+        title_align="left",
+        border_style="cyan",
+        padding=(1, 2),
+    ))
