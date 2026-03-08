@@ -259,6 +259,104 @@ def realistic_db(tmp_path: Path) -> Path:
         ],
     )
 
+    con.execute("""
+        CREATE TABLE service_spatial_seed (
+            service_id TEXT,
+            seed_type TEXT,
+            seed_priority INTEGER,
+            raw_value TEXT,
+            normalized_value TEXT,
+            street_hint TEXT,
+            house_number_hint TEXT,
+            city_hint TEXT,
+            postcode_hint TEXT,
+            insee_hint TEXT,
+            ban_id TEXT,
+            match_rule TEXT,
+            match_score INTEGER,
+            x_l93 REAL,
+            y_l93 REAL,
+            source_table TEXT,
+            source_column TEXT,
+            source_signal_kind TEXT,
+            source_signal_score INTEGER,
+            source_semantic_strength TEXT,
+            xy_precision_class TEXT,
+            xy_discriminance_score INTEGER,
+            same_xy_count_in_city INTEGER,
+            is_reused_xy INTEGER,
+            is_heavily_reused_xy INTEGER
+        )
+    """)
+    con.executemany(
+        "INSERT INTO service_spatial_seed VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("SVC-001", "postal_address_precise", 70, "Paris Nord", "PARIS NORD", None, None, "Paris", "75000", None, "BAN-001", "ban_full_label_exact", 94, 651000.0, 6861000.0, "service_lea_signal", "endpoint_a_raw", "postal_address_precise", 100, "strong", "precise", 100, 1, 0, 0),
+            ("SVC-002", "city_only", 90, "Marseille", "MARSEILLE", None, None, "Marseille", "13000", None, None, "ban_city_only", 35, None, None, "service_lea_signal", "Commune site", "city_only", 35, "weak", "weak_reused_point", 30, 12, 1, 1),
+        ],
+    )
+
+    con.execute("""
+        CREATE TABLE service_spatial_evidence (
+            service_id TEXT,
+            evidence_type TEXT,
+            seed_type TEXT,
+            target_table TEXT,
+            target_id TEXT,
+            distance_meters REAL,
+            score INTEGER,
+            rule_name TEXT,
+            context_json TEXT,
+            seed_discriminance_score INTEGER,
+            adjusted_score INTEGER
+        )
+    """)
+    con.executemany(
+        "INSERT INTO service_spatial_evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("SVC-001", "site_spatial", "postal_address_precise", "ref_sites", "SITE-PN", 42.0, 98, "site_spatial_proximity", '{"seed_city":"Paris"}', 100, 98),
+            ("SVC-001", "optical_spatial", "postal_address_precise", "ref_optical_cable", "CAB-001", 84.0, 88, "address_to_cable_endpoint", '{"reference":"CAB-PN"}', 100, 88),
+        ],
+    )
+
+    con.execute("""
+        CREATE TABLE service_lea_signal (
+            service_id TEXT,
+            lea_line_id TEXT,
+            source_column TEXT,
+            source_priority INTEGER,
+            raw_value TEXT,
+            normalized_value TEXT,
+            signal_kind TEXT,
+            signal_subkind TEXT,
+            signal_score INTEGER,
+            semantic_strength TEXT,
+            is_ban_candidate INTEGER,
+            is_site_candidate INTEGER,
+            is_optical_candidate INTEGER,
+            is_route_candidate INTEGER,
+            is_noise INTEGER,
+            street_hint TEXT,
+            house_number_hint TEXT,
+            city_hint TEXT,
+            postcode_hint TEXT,
+            insee_hint TEXT,
+            route_refs_json TEXT,
+            service_refs_json TEXT,
+            site_tokens_json TEXT,
+            technical_tokens_json TEXT,
+            extraction_rule TEXT,
+            classification_reason_json TEXT
+        )
+    """)
+    con.executemany(
+        "INSERT INTO service_lea_signal VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("SVC-001", "LEA-001", "CMD - Secteur géographique2", 100, "43 Avenue d'Italie 80000 Amiens", "43 AVENUE D ITALIE 80000 AMIENS", "postal_address_precise", "street_house_city", 100, "strong", 1, 1, 0, 0, 0, "AVENUE D ITALIE", "43", "AMIENS", "80000", None, "[]", "[]", '["AMIENS"]', "[]", "content_classification", '{"reasons":["street_house_city"]}'),
+            ("SVC-001", "LEA-001", "CMD - Secteur géographique1", 95, "POP AMIENS", "POP AMIENS", "technical_site_anchor", "technical_tokens", 82, "strong", 0, 1, 1, 0, 0, None, None, None, None, None, "[]", "[]", '["AMIENS"]', '["POP"]', "content_classification", '{"reasons":["technical_tokens"]}'),
+        ],
+    )
+
     con.commit()
     con.close()
 

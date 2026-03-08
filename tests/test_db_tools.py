@@ -13,9 +13,11 @@ _query_db = db_tools.query_db.handler
 _list_tables = db_tools.list_tables.handler
 _describe_table = db_tools.describe_table.handler
 _fetch_ctx = db_tools.fetch_service_context.handler
+_resolve_lea_signal = db_tools.resolve_lea_signal_candidates.handler
 _resolve_network_candidates = db_tools.resolve_network_candidates.handler
 _resolve_optical_candidates = db_tools.resolve_optical_candidates.handler
 _resolve_party = db_tools.resolve_party_candidates.handler
+_resolve_spatial = db_tools.resolve_spatial_candidates.handler
 
 
 def _run(coro):
@@ -96,6 +98,9 @@ class TestFetchServiceContext:
         assert "optical_support_rows" in text
         assert "gold_row" in text
         assert "service" in text
+        assert "lea_signal_rows" in text
+        assert "spatial_seed_rows" in text
+        assert "spatial_evidence_rows" in text
 
     def test_missing_service_returns_empty(self):
         result = _run(_fetch_ctx({"service_id": "NONEXISTENT"}))
@@ -131,3 +136,18 @@ class TestStructuredCandidateResolvers:
         text = result["content"][0]["text"]
         assert '"network_candidates"' in text
         assert '"gold_network"' in text
+
+    def test_returns_spatial_candidates(self):
+        result = _run(_resolve_spatial({"service_id": "SVC-001"}))
+        text = result["content"][0]["text"]
+        assert '"spatial_seeds"' in text
+        assert '"site_candidates"' in text
+        assert '"best_spatial_evidence"' in text
+        assert '"adjusted_score"' in text
+
+    def test_returns_lea_signal_candidates(self):
+        result = _run(_resolve_lea_signal({"service_id": "SVC-001"}))
+        text = result["content"][0]["text"]
+        assert '"classified_signals"' in text
+        assert '"recommended_technical_signals"' in text
+        assert '"postal_address_precise"' in text

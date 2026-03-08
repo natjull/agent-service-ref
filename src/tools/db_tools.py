@@ -121,6 +121,52 @@ def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str,
         "SELECT * FROM gold_service_active WHERE service_id = ?",
         (service_id,),
     ).fetchone()
+    spatial_seed_rows = (
+        con.execute(
+            """
+            SELECT service_id, seed_type, seed_priority, raw_value, normalized_value,
+                   street_hint, house_number_hint, city_hint, postcode_hint, insee_hint,
+                   ban_id, match_rule, match_score, x_l93, y_l93, source_table, source_column,
+                   source_signal_kind, source_signal_score, source_semantic_strength,
+                   xy_precision_class, xy_discriminance_score, same_xy_count_in_city,
+                   is_reused_xy, is_heavily_reused_xy
+            FROM service_spatial_seed
+            WHERE service_id = ?
+            ORDER BY seed_priority DESC, match_score DESC, source_column
+            """,
+            (service_id,),
+        ).fetchall()
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_spatial_seed'").fetchone()
+        else []
+    )
+    spatial_evidence_rows = (
+        con.execute(
+            """
+            SELECT service_id, evidence_type, seed_type, target_table, target_id,
+                   distance_meters, score, rule_name, context_json
+                   , seed_discriminance_score, adjusted_score
+            FROM service_spatial_evidence
+            WHERE service_id = ?
+            ORDER BY score DESC, distance_meters ASC
+            """,
+            (service_id,),
+        ).fetchall()
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_spatial_evidence'").fetchone()
+        else []
+    )
+    lea_signal_rows = (
+        con.execute(
+            """
+            SELECT *
+            FROM service_lea_signal
+            WHERE service_id = ?
+            ORDER BY source_priority DESC, signal_score DESC, source_column
+            """,
+            (service_id,),
+        ).fetchall()
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_lea_signal'").fetchone()
+        else []
+    )
 
     return {
         "service": _row_to_dict(service),
@@ -148,6 +194,15 @@ def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str,
         "endpoint_rows": _rows_to_dicts(endpoint_rows),
         "network_support_rows": _rows_to_dicts(network_support_rows),
         "optical_support_rows": _rows_to_dicts(optical_support_rows),
+        "lea_signal_rows": _rows_to_dicts(lea_signal_rows),
+        "spatial_seed_rows": _rows_to_dicts(spatial_seed_rows),
+        "spatial_evidence_rows": [
+            {
+                **_row_to_dict(row),
+                "context": json.loads(row["context_json"]) if row["context_json"] else None,
+            }
+            for row in spatial_evidence_rows
+        ],
         "gold_row": _row_to_dict(gold_row),
     }
 
@@ -278,6 +333,7 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
             "logical_route_id", "cable_id", "cable_match_rule", "cable_score",
             "housing_id", "housing_match_rule", "housing_score",
             "site_a_optical_id", "site_z_optical_id", "optical_context_json",
+            "spatial_match_rule", "spatial_distance_meters", "spatial_score",
         )
         if col in optical_cols
     ]
@@ -475,6 +531,109 @@ def _resolve_network_candidates(con: sqlite3.Connection, service_id: str) -> dic
     return payload
 
 
+def _resolve_spatial_candidates(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+    seeds = (
+        con.execute(
+            """
+            SELECT seed_type, seed_priority, raw_value, city_hint, match_rule,
+                   match_score, x_l93, y_l93, source_column,
+                   source_signal_kind, source_signal_score, source_semantic_strength,
+                   xy_precision_class, xy_discriminance_score, same_xy_count_in_city,
+                   is_reused_xy, is_heavily_reused_xy
+            FROM service_spatial_seed
+            WHERE service_id = ?
+            ORDER BY seed_priority DESC, match_score DESC
+            """,
+            (service_id,),
+        ).fetchall()
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_spatial_seed'").fetchone()
+        else []
+    )
+    evidences = (
+        con.execute(
+            """
+            SELECT evidence_type, seed_type, target_table, target_id,
+                   distance_meters, score, rule_name, context_json,
+                   seed_discriminance_score, adjusted_score
+            FROM service_spatial_evidence
+            WHERE service_id = ?
+            ORDER BY adjusted_score DESC, distance_meters ASC
+            LIMIT 20
+            """,
+            (service_id,),
+        ).fetchall()
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_spatial_evidence'").fetchone()
+        else []
+    )
+    site_candidates = [row for row in evidences if row["target_table"] == "ref_sites"]
+    housing_candidates = [row for row in evidences if row["target_table"] == "ref_optical_housing"]
+    cable_candidates = [row for row in evidences if row["target_table"] == "ref_optical_cable"]
+    best = evidences[0] if evidences else None
+    return {
+        "service_id": service_id,
+        "spatial_seeds": _rows_to_dicts(seeds),
+        "site_candidates": [
+            {**_row_to_dict(row), "context": json.loads(row["context_json"]) if row["context_json"] else None}
+            for row in site_candidates
+        ],
+        "housing_candidates": [
+            {**_row_to_dict(row), "context": json.loads(row["context_json"]) if row["context_json"] else None}
+            for row in housing_candidates
+        ],
+        "cable_candidates": [
+            {**_row_to_dict(row), "context": json.loads(row["context_json"]) if row["context_json"] else None}
+            for row in cable_candidates
+        ],
+        "best_spatial_evidence": (
+            {**_row_to_dict(best), "context": json.loads(best["context_json"]) if best and best["context_json"] else None}
+            if best is not None
+            else None
+        ),
+        "reasoning_summary": (
+            f"Best spatial evidence: {best['target_table']} {best['target_id']} at {best['distance_meters']}m "
+            f"(adjusted={best['adjusted_score']}, seed={best['seed_type']})"
+            if best is not None
+            else "No spatial evidence available"
+        ),
+    }
+
+
+def _resolve_lea_signal_candidates(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+    rows = (
+        con.execute(
+            """
+            SELECT *
+            FROM service_lea_signal
+            WHERE service_id = ?
+            ORDER BY source_priority DESC, signal_score DESC, source_column
+            """,
+            (service_id,),
+        ).fetchall()
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_lea_signal'").fetchone()
+        else []
+    )
+    payload_rows = _rows_to_dicts(rows)
+    return {
+        "service_id": service_id,
+        "raw_lea_values": [
+            {"source_column": row["source_column"], "raw_value": row["raw_value"]}
+            for row in payload_rows
+        ],
+        "classified_signals": payload_rows,
+        "recommended_address_signals": [row for row in payload_rows if row["signal_kind"] in {"postal_address_precise", "mixed_site_address", "postal_address_partial", "postcode_city", "city_only"}][:5],
+        "recommended_site_signals": [row for row in payload_rows if row["signal_kind"] in {"technical_site_anchor", "site_label_business", "mixed_site_address", "postal_address_precise", "postal_address_partial"}][:5],
+        "recommended_technical_signals": [row for row in payload_rows if row["signal_kind"] == "technical_site_anchor"][:5],
+        "recommended_route_signals": [row for row in payload_rows if row["signal_kind"] == "route_or_service_reference"][:5],
+        "noise_signals": [row for row in payload_rows if row["is_noise"]][:5],
+        "reasoning_summary": (
+            f"{len(payload_rows)} LEA signals classified; top="
+            f"{', '.join(row['signal_kind'] for row in payload_rows[:3])}"
+            if payload_rows
+            else "No LEA signals available"
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -659,7 +818,9 @@ async def get_service_decision_pack(args: dict[str, Any]) -> dict[str, Any]:
     con = _connect(read_only=True)
     try:
         payload = _fetch_service_bundle(con, service_id)
+        payload["lea_signal_pack"] = _resolve_lea_signal_candidates(con, service_id)
         payload["party_candidates"] = _resolve_party_candidates(con, service_id)
+        payload["spatial_candidates"] = _resolve_spatial_candidates(con, service_id)
         return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     except Exception as e:
         return _text(f"ERROR: {e}")
@@ -702,6 +863,48 @@ async def resolve_network_candidates(args: dict[str, Any]) -> dict[str, Any]:
     con = _connect(read_only=True)
     try:
         payload = _resolve_network_candidates(con, service_id)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "resolve_lea_signal_candidates",
+    "Retourne les valeurs LEA brutes d'un service, leur classification interpretee "
+    "et les signaux recommandes pour adresse, site, technique et route.",
+    {"service_id": str},
+)
+async def resolve_lea_signal_candidates(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _resolve_lea_signal_candidates(con, service_id)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "resolve_spatial_candidates",
+    "Retourne les seeds geocodes, les meilleures evidences spatiales et les candidats site/housing/cable "
+    "pour un service. A utiliser pour departager des cas textuels ambigus.",
+    {"service_id": str},
+)
+async def resolve_spatial_candidates(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _resolve_spatial_candidates(con, service_id)
         return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     except Exception as e:
         return _text(f"ERROR: {e}")

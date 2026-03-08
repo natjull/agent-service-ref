@@ -14,6 +14,7 @@ def run(cfg: BuildConfig) -> dict[str, int]:
     con = connect(cfg.db_path)
     legacy.create_schema(con)
     legacy.load_lea_active(con)
+    legacy.load_ban_addresses(con)
     legacy.load_sites(con)
     legacy.load_routes(con)
     legacy.load_lease_tables(con)
@@ -24,6 +25,7 @@ def run(cfg: BuildConfig) -> dict[str, int]:
     stats = {
         "lea_active_lines": con.execute("select count(*) from lea_active_lines").fetchone()[0],
         "ref_sites": con.execute("select count(*) from ref_sites").fetchone()[0],
+        "ref_ban_address": con.execute("select count(*) from ref_ban_address").fetchone()[0],
         "ref_routes": con.execute("select count(*) from ref_routes").fetchone()[0],
         "ref_optical_logical_route": con.execute("select count(*) from ref_optical_logical_route").fetchone()[0],
         "ref_optical_cable": con.execute("select count(*) from ref_optical_cable").fetchone()[0],

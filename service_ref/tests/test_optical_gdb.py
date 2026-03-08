@@ -23,7 +23,7 @@ def _insert_ref_site(
 ) -> None:
     con.execute(
         """
-        insert into ref_sites values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        insert into ref_sites values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             site_id,
@@ -40,6 +40,10 @@ def _insert_ref_site(
             legacy.norm_text(reference),
             legacy.norm_text(userreference),
             legacy.norm_text(address1),
+            None,
+            None,
+            None,
+            None,
         ),
     )
 
@@ -185,6 +189,11 @@ def test_load_routes_builds_optical_tables_from_gdb(monkeypatch) -> None:
             "iter_gdb_records",
             lambda layer: iter(fake_layers.get(layer, [])),
         )
+        monkeypatch.setattr(
+            legacy,
+            "iter_gdb_features",
+            lambda layer: ((item, None, "unknown") for item in fake_layers.get(layer, [])),
+        )
 
         legacy.load_routes(con)
 
@@ -316,6 +325,11 @@ def test_load_lease_tables_builds_logical_routes_and_endpoints(monkeypatch) -> N
             legacy,
             "iter_gdb_records",
             lambda layer: iter(fake_layers.get(layer, [])),
+        )
+        monkeypatch.setattr(
+            legacy,
+            "iter_gdb_features",
+            lambda layer: ((item, None, "unknown") for item in fake_layers.get(layer, [])),
         )
 
         legacy.load_lease_tables(con)

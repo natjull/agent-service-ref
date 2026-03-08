@@ -9,6 +9,7 @@ DEFAULT_OUT_DIR = ROOT / "service_ref" / "output"
 DEFAULT_DB_PATH = DEFAULT_OUT_DIR / "service_referential.sqlite"
 DEFAULT_LEA_PATH = ROOT / "6-3_20260203_Suivi_Contrats_LEA.xlsx"
 DEFAULT_GDB_ZIP_PATH = ROOT / "GDB_TeloiseV3 (1).zip"
+DEFAULT_BAN_60_PATH = ROOT / "ban-60.csv"
 DEFAULT_SWAG_PATH = ROOT / "unzipped_equip" / "Export inventaire SWAG.xlsx"
 DEFAULT_CPE_PATH = ROOT / "unzipped_equip" / "Inventaire CPE Teloise Janv26.xlsx"
 DEFAULT_CONFIG_DIR = ROOT / "unzipped_equip"
@@ -38,6 +39,7 @@ class BuildConfig:
     db_path: Path = DEFAULT_DB_PATH
     lea_path: Path = DEFAULT_LEA_PATH
     gdb_zip_path: Path = DEFAULT_GDB_ZIP_PATH
+    ban_60_path: Path = DEFAULT_BAN_60_PATH
     swag_path: Path = DEFAULT_SWAG_PATH
     cpe_path: Path = DEFAULT_CPE_PATH
     config_dir: Path = DEFAULT_CONFIG_DIR
@@ -68,6 +70,7 @@ def apply_runtime_config(cfg: BuildConfig) -> None:
     legacy.DB_PATH = cfg.db_path
     legacy.LEA_PATH = cfg.lea_path
     legacy.GDB_ZIP_PATH = cfg.gdb_zip_path
+    legacy.BAN_60_PATH = cfg.ban_60_path
     legacy.SWAG_PATH = cfg.swag_path
     legacy.CPE_PATH = cfg.cpe_path
     legacy.CONFIG_DIR = cfg.config_dir

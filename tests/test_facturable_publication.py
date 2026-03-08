@@ -158,6 +158,8 @@ def test_build_facturable_publication_without_agent_tables_uses_gold(publication
         assert json.loads(row["lea_line_ids_json"]) == ["LEA-001A", "LEA-001B"]
         assert row["final_party_id"] == "P-ACME"
         assert row["network_vlan_id"] == "NVL-100"
+        assert row["spatial_confidence_band"] == "none"
+        assert "seed_a" in json.loads(row["spatial_summary_json"])
     finally:
         con.close()
 

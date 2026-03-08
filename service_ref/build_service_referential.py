@@ -19,6 +19,16 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
     fiona = None
 
 try:
+    from pyproj import Transformer
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
+    Transformer = None
+
+try:
+    from shapely.geometry import shape
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
+    shape = None
+
+try:
     import openpyxl
 except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
     openpyxl = None
@@ -32,6 +42,7 @@ DB_PATH = OUT_DIR / "service_referential.sqlite"
 
 LEA_PATH = ROOT / "6-3_20260203_Suivi_Contrats_LEA.xlsx"
 GDB_ZIP_PATH = ROOT / "GDB_TeloiseV3 (1).zip"
+BAN_60_PATH = ROOT / "ban-60.csv"
 SWAG_PATH = ROOT / "unzipped_equip" / "Export inventaire SWAG.xlsx"
 CPE_PATH = ROOT / "unzipped_equip" / "Inventaire CPE Teloise Janv26.xlsx"
 CONFIG_DIR = ROOT / "unzipped_equip"
@@ -70,6 +81,8 @@ HOSTNAME_PATTERN = re.compile(r"\bsysname\s+([^\s]+)|\bhostname\s+([^\s]+)", re.
 HEADER_PATTERN = re.compile(r'header shell information\s+"([^"]+)"', re.IGNORECASE)
 CABLE_FIBERS_PATTERN = re.compile(r"\b(\d{1,3})\s*FO\b", re.IGNORECASE)
 PLACE_TOKEN_PATTERN = re.compile(r"[A-Z0-9]{3,}")
+POSTCODE_PATTERN = re.compile(r"\b\d{5}\b")
+HOUSE_NUMBER_PATTERN = re.compile(r"^\d{1,5}[A-Z]?$")
 HOUSING_SITE_RELATION_LAYERS = {
     "Chamber__Hubsite": ("Chamber", "CHAMBER_MIGRATION_OID", "HUBSITE_MIGRATION_OID"),
     "SupportStructure__Hubsite": ("SupportStructure", "SUPPORTSTRUCTURE_MIGRATION_OID", "HUBSITE_MIGRATION_OID"),
@@ -214,6 +227,282 @@ BUSINESS_STOPWORDS = {
     "RUE",
 }
 
+ADDRESS_NOISE_STOPWORDS = {
+    "CLIENT",
+    "CLIENTS",
+    "SITE",
+    "SITES",
+    "BATIMENT",
+    "BAT",
+    "BATI",
+    "SERVICE",
+    "SERVICES",
+    "LIGNE",
+    "LIGNES",
+    "TELOISE",
+    "ADISTA",
+    "FRANCE",
+}
+
+STREET_TYPE_TOKENS = {
+    "RUE",
+    "AVENUE",
+    "BD",
+    "BOULEVARD",
+    "CHEMIN",
+    "IMPASSE",
+    "ALLEE",
+    "ALL",
+    "ROUTE",
+    "PLACE",
+    "VOIE",
+    "SENTE",
+    "SQUARE",
+    "QUAI",
+    "COUR",
+    "FAUBOURG",
+    "RTE",
+}
+
+SPATIAL_HEADER_KEYWORDS = (
+    "ADRESSE",
+    "COMMUNE",
+    "VILLE",
+    "POSTAL",
+    "INSEE",
+)
+
+LEA_SIGNAL_SOURCE_PRIORITY = {
+    "CMD - Secteur géographique2": 100,
+    "CMD - Secteur géographique1": 95,
+    "Client Final (ADV)": 70,
+    "CMD - Numéro commande externe": 60,
+    "nom fichier": 45,
+    "endpoint_z_raw": 90,
+    "endpoint_a_raw": 85,
+    "client_final": 65,
+    "principal_external_ref": 55,
+    "principal_client": 25,
+}
+
+LEA_TECHNICAL_TOKENS = {
+    "POP",
+    "CHAMBRE",
+    "BPE",
+    "INTERCO",
+    "NRA",
+    "BAIE",
+    "SHELTER",
+    "PM",
+}
+
+LEA_SITE_BUSINESS_TOKENS = {
+    "MAIRIE",
+    "COLLEGE",
+    "LYCEE",
+    "INSTITUT",
+    "HOPITAL",
+    "CLINIQUE",
+    "CENTRE",
+    "CROIX",
+    "ROUGE",
+    "ECOLE",
+    "GYMNASE",
+    "MUSEE",
+    "CMA",
+    "COLLÈGE",
+    "LYCÉE",
+    "MÉDIATHÈQUE",
+}
+
+LEA_NOISE_LABELS = {
+    "GAR",
+    "PASS1",
+    "PASS2",
+    "PASS1 ET 2",
+    "PASS 1 ET 2",
+    "PASS 1",
+    "PASS 2",
+    "N C",
+    "NC",
+}
+
+ROUTE_OR_SERVICE_KEYWORD_RE = re.compile(r"\b(?:TOIP|L2L|OPE|INTX|WF)\b", re.IGNORECASE)
+UPPER_ALPHA_ONLY_RE = re.compile(r"^[A-ZÀ-ÿ' -]{3,}$")
+
+_WGS84_TO_L93: Transformer | None = None
+_L2E_TO_L93: Transformer | None = None
+
+
+def _get_transformer_to_l93() -> Transformer | None:
+    global _WGS84_TO_L93
+    if Transformer is None:
+        return None
+    if _WGS84_TO_L93 is None:
+        _WGS84_TO_L93 = Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=True)
+    return _WGS84_TO_L93
+
+
+def _get_l2e_to_l93_transformer() -> Transformer | None:
+    global _L2E_TO_L93
+    if Transformer is None:
+        return None
+    if _L2E_TO_L93 is None:
+        _L2E_TO_L93 = Transformer.from_crs("EPSG:27572", "EPSG:2154", always_xy=True)
+    return _L2E_TO_L93
+
+
+def _project_wgs84_to_l93(lon: object, lat: object) -> tuple[float | None, float | None]:
+    try:
+        lon_value = float(lon)
+        lat_value = float(lat)
+    except (TypeError, ValueError):
+        return None, None
+    transformer = _get_transformer_to_l93()
+    if transformer is None:
+        return lon_value, lat_value
+    try:
+        x_value, y_value = transformer.transform(lon_value, lat_value)
+    except Exception:
+        return None, None
+    return x_value, y_value
+
+
+def _distance_meters(
+    x1: object,
+    y1: object,
+    x2: object,
+    y2: object,
+) -> float | None:
+    try:
+        dx = float(x1) - float(x2)
+        dy = float(y1) - float(y2)
+    except (TypeError, ValueError):
+        return None
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _extract_point_xy(geometry: object) -> tuple[float | None, float | None]:
+    if not geometry:
+        return None, None
+    try:
+        if shape is not None:
+            geom = shape(geometry)
+            point = geom.centroid
+            return float(point.x), float(point.y)
+    except Exception:
+        pass
+    coords = geometry.get("coordinates") if isinstance(geometry, dict) else None
+    if not coords:
+        return None, None
+    if isinstance(coords, (list, tuple)) and len(coords) >= 2:
+        return float(coords[0]), float(coords[1])
+    return None, None
+
+
+def _extract_line_geometry_points(
+    geometry: object,
+) -> tuple[float | None, float | None, float | None, float | None, float | None, float | None]:
+    if not geometry:
+        return None, None, None, None, None, None
+    try:
+        if shape is not None:
+            geom = shape(geometry)
+            if geom.is_empty:
+                return None, None, None, None, None, None
+            first = geom.boundary.geoms[0] if hasattr(geom.boundary, "geoms") and geom.boundary.geoms else geom.centroid
+            last = geom.boundary.geoms[-1] if hasattr(geom.boundary, "geoms") and geom.boundary.geoms else geom.centroid
+            centroid = geom.centroid
+            return float(first.x), float(first.y), float(last.x), float(last.y), float(centroid.x), float(centroid.y)
+    except Exception:
+        pass
+
+    coords = geometry.get("coordinates") if isinstance(geometry, dict) else None
+    if not coords:
+        return None, None, None, None, None, None
+    points: list[tuple[float, float]] = []
+    if isinstance(coords, (list, tuple)):
+        if coords and isinstance(coords[0], (list, tuple)) and coords and len(coords[0]) >= 2 and isinstance(coords[0][0], (int, float)):
+            points = [(float(point[0]), float(point[1])) for point in coords if len(point) >= 2]
+        else:
+            for part in coords:
+                if isinstance(part, (list, tuple)):
+                    for point in part:
+                        if isinstance(point, (list, tuple)) and len(point) >= 2:
+                            points.append((float(point[0]), float(point[1])))
+    if not points:
+        return None, None, None, None, None, None
+    centroid_x = sum(point[0] for point in points) / len(points)
+    centroid_y = sum(point[1] for point in points) / len(points)
+    return points[0][0], points[0][1], points[-1][0], points[-1][1], centroid_x, centroid_y
+
+
+def _crs_to_srid(crs: object) -> str:
+    if crs is None:
+        return "unknown"
+    text = str(crs).upper()
+    if "2154" in text:
+        return "EPSG:2154"
+    if "27572" in text:
+        return "EPSG:27572"
+    if "4326" in text:
+        return "EPSG:4326"
+    return text[:64]
+
+
+def _geometry_to_l93_xy(geometry: object, srid: str) -> tuple[float | None, float | None]:
+    x_value, y_value = _extract_point_xy(geometry)
+    if x_value is None or y_value is None:
+        return None, None
+    if srid == "EPSG:4326":
+        return _project_wgs84_to_l93(x_value, y_value)
+    if srid == "EPSG:27572":
+        transformer = _get_l2e_to_l93_transformer()
+        if transformer is not None:
+            try:
+                return transformer.transform(x_value, y_value)
+            except Exception:
+                return None, None
+    return x_value, y_value
+
+
+def _line_geometry_to_l93_points(
+    geometry: object,
+    srid: str,
+) -> tuple[float | None, float | None, float | None, float | None, float | None, float | None]:
+    start_x, start_y, end_x, end_y, centroid_x, centroid_y = _extract_line_geometry_points(geometry)
+    points = [start_x, start_y, end_x, end_y, centroid_x, centroid_y]
+    if all(point is None for point in points):
+        return None, None, None, None, None, None
+    if srid == "EPSG:4326":
+        start_x, start_y = _project_wgs84_to_l93(start_x, start_y)
+        end_x, end_y = _project_wgs84_to_l93(end_x, end_y)
+        centroid_x, centroid_y = _project_wgs84_to_l93(centroid_x, centroid_y)
+    elif srid == "EPSG:27572":
+        transformer = _get_l2e_to_l93_transformer()
+        if transformer is not None:
+            try:
+                start_x, start_y = transformer.transform(start_x, start_y)
+                end_x, end_y = transformer.transform(end_x, end_y)
+                centroid_x, centroid_y = transformer.transform(centroid_x, centroid_y)
+            except Exception:
+                return None, None, None, None, None, None
+    return start_x, start_y, end_x, end_y, centroid_x, centroid_y
+
+
+def iter_gdb_features(layer: str) -> Iterator[tuple[dict[str, object], object, str]]:
+    if fiona is not None:
+        try:
+            with fiona.open(GDB_URI, layer=layer) as src:
+                srid = _crs_to_srid(src.crs_wkt or src.crs)
+                for feature in src:
+                    yield dict(feature["properties"]), feature.get("geometry"), srid
+                return
+        except Exception:
+            pass
+    for item in iter_gdb_records(layer):
+        yield item, None, "unknown"
+
 INTERFACE_START_RE = re.compile(r"^interface\s+(.+)$", re.IGNORECASE)
 RAD_ETHERNET_START_RE = re.compile(r"^ethernet\s+(\d+)$", re.IGNORECASE)
 VLAN_START_RE = re.compile(r"^vlan\s+(\d+)$", re.IGNORECASE)
@@ -278,6 +567,298 @@ def clean_business_label(value: object) -> str:
     label = re.sub(r"\b\d{3,5}\b", " ", label)
     tokens = [token for token in label.split() if token not in BUSINESS_STOPWORDS]
     return " ".join(tokens).strip()
+
+
+def _is_spatial_lea_header(header: object) -> bool:
+    normalized = norm_text(header)
+    return any(keyword in normalized for keyword in SPATIAL_HEADER_KEYWORDS)
+
+
+def _collect_spatial_hints(headers: list[str], row: tuple[object, ...]) -> dict[str, str]:
+    hints: dict[str, str] = {}
+    for idx, header in enumerate(headers):
+        if not _is_spatial_lea_header(header):
+            continue
+        value = row[idx] if idx < len(row) else None
+        cleaned = str(value or "").strip()
+        if cleaned:
+            hints[header] = cleaned
+    return hints
+
+
+def _extract_ban_value(record: dict[str, object], *keys: str) -> str:
+    for key in keys:
+        if key in record and record[key] not in (None, ""):
+            return str(record[key]).strip()
+    return ""
+
+
+def _normalize_city(value: object) -> str:
+    tokens = [token for token in norm_text(value).split() if token not in ADDRESS_NOISE_STOPWORDS]
+    return " ".join(tokens).strip()
+
+
+def parse_address_seed(value: object) -> dict[str, str]:
+    raw_value = str(value or "").strip()
+    normalized = norm_text(raw_value)
+    postcode_match = POSTCODE_PATTERN.search(normalized)
+    postcode = postcode_match.group(0) if postcode_match else ""
+    tokens = normalized.split()
+    house_number = ""
+    if tokens and HOUSE_NUMBER_PATTERN.match(tokens[0]):
+        house_number = tokens[0]
+        tokens = tokens[1:]
+
+    street_idx = next((idx for idx, token in enumerate(tokens) if token in STREET_TYPE_TOKENS), None)
+    street_name = ""
+    city = ""
+    if street_idx is not None:
+        street_tokens = []
+        if postcode and postcode in normalized:
+            after_postcode = normalized.split(postcode, 1)[1].strip()
+            city = _normalize_city(after_postcode)
+            street_tokens = [token for token in tokens[street_idx:] if token != postcode]
+        elif len(tokens[street_idx:]) >= 3:
+            city = _normalize_city(tokens[-1])
+            street_tokens = tokens[street_idx:-1]
+            if not street_tokens:
+                street_tokens = tokens[street_idx:]
+        elif len(tokens[street_idx:]) >= 2:
+            city = _normalize_city(tokens[-1])
+            street_tokens = tokens[street_idx:-1]
+        street_name = " ".join(token for token in street_tokens if token and token not in ADDRESS_NOISE_STOPWORDS).strip()
+    elif postcode:
+        city = _normalize_city(normalized.split(postcode, 1)[1].strip())
+    else:
+        city = _normalize_city(normalized)
+
+    return {
+        "raw_value": raw_value,
+        "normalized_value": normalized,
+        "house_number": house_number,
+        "street_name": street_name,
+        "city": city,
+        "postcode": postcode,
+    }
+
+
+def _seed_type_from_parsed(parsed: dict[str, str], preferred_type: str) -> str:
+    if parsed["street_name"]:
+        return preferred_type
+    if parsed["city"]:
+        return "lea_city_only" if preferred_type.startswith("lea_") else f"{preferred_type}_city_only"
+    return preferred_type
+
+
+def _spatial_score_for_distance(distance_meters: float | None) -> int:
+    if distance_meters is None:
+        return 0
+    if distance_meters <= 50:
+        return 98
+    if distance_meters <= 100:
+        return 94
+    if distance_meters <= 200:
+        return 88
+    if distance_meters <= 500:
+        return 75
+    return 0
+
+
+def _semantic_strength_rank(value: object) -> int:
+    return {"strong": 3, "medium": 2, "weak": 1}.get(str(value or "").lower(), 0)
+
+
+def _xy_precision_class(count: int) -> str:
+    if count >= 10:
+        return "weak_reused_point"
+    if count >= 2:
+        return "shared"
+    return "precise"
+
+
+def _xy_discriminance_score(count: int) -> int:
+    if count >= 10:
+        return 30
+    if count >= 5:
+        return 55
+    if count >= 2:
+        return 75
+    return 100
+
+
+def _extract_technical_tokens(value: object) -> list[str]:
+    normalized = norm_text(value)
+    if not normalized:
+        return []
+    tokens = []
+    seen: set[str] = set()
+    for token in normalized.split():
+        if token in LEA_TECHNICAL_TOKENS and token not in seen:
+            tokens.append(token)
+            seen.add(token)
+    return tokens
+
+
+def _extract_site_label_tokens(value: object) -> list[str]:
+    normalized = norm_text(value)
+    if not normalized:
+        return []
+    tokens = []
+    seen: set[str] = set()
+    for token in normalized.split():
+        if token in LEA_SITE_BUSINESS_TOKENS and token not in seen:
+            tokens.append(token)
+            seen.add(token)
+    return tokens
+
+
+def _has_business_prefix_before_street(raw_value: str, parsed: dict[str, str]) -> bool:
+    normalized = norm_text(raw_value)
+    tokens = normalized.split()
+    street_idx = next((idx for idx, token in enumerate(tokens) if token in STREET_TYPE_TOKENS), None)
+    if street_idx is None or street_idx == 0:
+        return False
+    prefix = " ".join(tokens[:street_idx]).strip(" -/")
+    if not prefix:
+        return False
+    prefix_tokens = [token for token in prefix.split() if token not in ADDRESS_NOISE_STOPWORDS]
+    if len(prefix_tokens) >= 2:
+        return True
+    if len(prefix_tokens) == 1 and len(prefix_tokens[0]) >= 5:
+        return True
+    return any(token in LEA_SITE_BUSINESS_TOKENS for token in prefix_tokens)
+
+
+def _is_noise_label(value: str) -> bool:
+    normalized = norm_text(value)
+    if not normalized:
+        return True
+    if normalized in LEA_NOISE_LABELS:
+        return True
+    if len(normalized) <= 3:
+        return True
+    if normalized.isdigit():
+        return True
+    if normalized in {"PASS1 ET 2", "PASS1", "PASS2", "GAR"}:
+        return True
+    return False
+
+
+def classify_lea_signal(raw_value: object, source_column: str, known_cities: set[str]) -> dict[str, object] | None:
+    raw_text = str(raw_value or "").strip()
+    normalized = norm_text(raw_text)
+    if not normalized:
+        return None
+
+    parsed = parse_address_seed(raw_text)
+    technical_tokens = _extract_technical_tokens(raw_text)
+    site_tokens = extract_place_tokens(raw_text)
+    business_tokens_found = _extract_site_label_tokens(raw_text)
+    route_refs = extract_route_refs(raw_text)
+    service_refs = extract_service_refs(raw_text)
+    reasons: list[str] = []
+
+    signal_kind = "weak_business_label"
+    signal_subkind = ""
+    signal_score = 25
+    semantic_strength = "weak"
+
+    if _is_noise_label(raw_text):
+        signal_kind = "noise"
+        signal_subkind = "noise_label"
+        signal_score = 0
+        reasons.append("noise_label")
+    elif parsed["street_name"] and parsed["city"] and _has_business_prefix_before_street(raw_text, parsed):
+        signal_kind = "mixed_site_address"
+        signal_subkind = "site_and_address"
+        signal_score = 95
+        semantic_strength = "strong"
+        reasons.append("business_prefix_before_street")
+    elif parsed["street_name"] and parsed["city"] and parsed["house_number"]:
+        signal_kind = "postal_address_precise"
+        signal_subkind = "street_house_city"
+        signal_score = 100
+        semantic_strength = "strong"
+        reasons.append("street_house_city")
+    elif parsed["street_name"] and (parsed["city"] or parsed["house_number"]):
+        signal_kind = "postal_address_partial"
+        signal_subkind = "street_partial"
+        signal_score = 85
+        semantic_strength = "medium"
+        reasons.append("street_partial")
+    elif parsed["postcode"] and parsed["city"]:
+        signal_kind = "postcode_city"
+        signal_subkind = "postcode_city"
+        signal_score = 55
+        reasons.append("postcode_city")
+    elif technical_tokens:
+        signal_kind = "technical_site_anchor"
+        signal_subkind = "technical_tokens"
+        signal_score = 82
+        semantic_strength = "strong"
+        reasons.append("technical_tokens")
+    elif route_refs or service_refs or ROUTE_OR_SERVICE_KEYWORD_RE.search(raw_text):
+        signal_kind = "route_or_service_reference"
+        signal_subkind = "route_service_ref"
+        signal_score = 70
+        semantic_strength = "medium"
+        reasons.append("route_or_service_reference")
+    elif business_tokens_found:
+        signal_kind = "site_label_business"
+        signal_subkind = "business_site_label"
+        signal_score = 78
+        semantic_strength = "medium"
+        reasons.append("business_site_label")
+    elif parsed["city"] and parsed["city"] in known_cities and not parsed["street_name"]:
+        signal_kind = "city_only"
+        signal_subkind = "city_only"
+        signal_score = 35
+        reasons.append("known_city_only")
+    elif UPPER_ALPHA_ONLY_RE.match(str(raw_text).strip()) or len(site_tokens) >= 1:
+        signal_kind = "weak_business_label"
+        signal_subkind = "free_label"
+        signal_score = 25
+        reasons.append("free_label")
+    else:
+        signal_kind = "noise"
+        signal_subkind = "unusable"
+        signal_score = 0
+        reasons.append("unusable")
+
+    is_noise = 1 if signal_kind == "noise" else 0
+    return {
+        "raw_value": raw_text,
+        "normalized_value": normalized,
+        "signal_kind": signal_kind,
+        "signal_subkind": signal_subkind,
+        "signal_score": signal_score,
+        "semantic_strength": semantic_strength,
+        "is_ban_candidate": 1 if signal_kind in {"postal_address_precise", "mixed_site_address", "postal_address_partial", "postcode_city", "city_only"} else 0,
+        "is_site_candidate": 1 if signal_kind in {"postal_address_precise", "mixed_site_address", "postal_address_partial", "technical_site_anchor", "site_label_business"} else 0,
+        "is_optical_candidate": 1 if signal_kind in {"technical_site_anchor", "mixed_site_address", "route_or_service_reference", "site_label_business"} else 0,
+        "is_route_candidate": 1 if signal_kind == "route_or_service_reference" else 0,
+        "is_noise": is_noise,
+        "street_hint": parsed["street_name"] or None,
+        "house_number_hint": parsed["house_number"] or None,
+        "city_hint": parsed["city"] or None,
+        "postcode_hint": parsed["postcode"] or None,
+        "insee_hint": None,
+        "route_refs_json": json.dumps(route_refs, ensure_ascii=True),
+        "service_refs_json": json.dumps(service_refs, ensure_ascii=True),
+        "site_tokens_json": json.dumps(site_tokens, ensure_ascii=True),
+        "technical_tokens_json": json.dumps(technical_tokens, ensure_ascii=True),
+        "extraction_rule": "content_classification",
+        "classification_reason_json": json.dumps(
+            {
+                "reasons": reasons,
+                "source_column": source_column,
+                "business_tokens": business_tokens_found,
+                "technical_tokens": technical_tokens,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+    }
 
 
 def business_tokens(value: object) -> set[str]:
@@ -562,6 +1143,7 @@ def create_schema(con: sqlite3.Connection) -> None:
         """
         drop table if exists lea_active_lines;
         drop table if exists ref_sites;
+        drop table if exists ref_ban_address;
         drop table if exists ref_optical_logical_route;
         drop table if exists ref_optical_lease;
         drop table if exists ref_optical_lease_endpoint;
@@ -585,6 +1167,9 @@ def create_schema(con: sqlite3.Connection) -> None:
         drop table if exists party_alias;
         drop table if exists service_master_active;
         drop table if exists service_bss_line;
+        drop table if exists service_lea_signal;
+        drop table if exists service_spatial_seed;
+        drop table if exists service_spatial_evidence;
         drop table if exists service_party;
         drop table if exists service_endpoint;
         drop table if exists service_support_optique;
@@ -625,7 +1210,8 @@ def create_schema(con: sqlite3.Connection) -> None:
             service_refs_json text,
             is_old integer,
             grouping_key text,
-            source_row integer
+            source_row integer,
+            spatial_hints_json text
         );
 
         create table ref_sites (
@@ -642,7 +1228,34 @@ def create_schema(con: sqlite3.Connection) -> None:
             project_code text,
             normalized_reference text,
             normalized_userreference text,
-            normalized_address text
+            normalized_address text,
+            geom_x real,
+            geom_y real,
+            geom_source text,
+            srid text
+        );
+
+        create table ref_ban_address (
+            ban_id text primary key,
+            department_code text,
+            insee_code text,
+            postcode text,
+            city text,
+            street_name text,
+            house_number text,
+            full_label text,
+            normalized_label text,
+            normalized_city text,
+            normalized_street_name text,
+            lon real,
+            lat real,
+            x_l93 real,
+            y_l93 real,
+            same_xy_count_in_city integer,
+            is_reused_xy integer,
+            is_heavily_reused_xy integer,
+            xy_precision_class text,
+            xy_discriminance_score integer
         );
 
         create table ref_optical_logical_route (
@@ -712,7 +1325,15 @@ def create_schema(con: sqlite3.Connection) -> None:
             project_code text,
             status text,
             normalized_reference text,
-            site_tokens_json text
+            site_tokens_json text,
+            geom_start_x real,
+            geom_start_y real,
+            geom_end_x real,
+            geom_end_y real,
+            geom_centroid_x real,
+            geom_centroid_y real,
+            geom_source text,
+            srid text
         );
 
         create table ref_optical_housing (
@@ -729,7 +1350,11 @@ def create_schema(con: sqlite3.Connection) -> None:
             site_id text,
             site_name text,
             site_resolution_rule text,
-            site_score integer
+            site_score integer,
+            geom_x real,
+            geom_y real,
+            geom_source text,
+            srid text
         );
 
         create table ref_optical_connection (
@@ -971,6 +1596,77 @@ def create_schema(con: sqlite3.Connection) -> None:
             is_principal integer
         );
 
+        create table service_lea_signal (
+            service_id text,
+            lea_line_id text,
+            source_column text,
+            source_priority integer,
+            raw_value text,
+            normalized_value text,
+            signal_kind text,
+            signal_subkind text,
+            signal_score integer,
+            semantic_strength text,
+            is_ban_candidate integer,
+            is_site_candidate integer,
+            is_optical_candidate integer,
+            is_route_candidate integer,
+            is_noise integer,
+            street_hint text,
+            house_number_hint text,
+            city_hint text,
+            postcode_hint text,
+            insee_hint text,
+            route_refs_json text,
+            service_refs_json text,
+            site_tokens_json text,
+            technical_tokens_json text,
+            extraction_rule text,
+            classification_reason_json text
+        );
+
+        create table service_spatial_seed (
+            service_id text,
+            seed_type text,
+            seed_priority integer,
+            raw_value text,
+            normalized_value text,
+            street_hint text,
+            house_number_hint text,
+            city_hint text,
+            postcode_hint text,
+            insee_hint text,
+            ban_id text,
+            match_rule text,
+            match_score integer,
+            x_l93 real,
+            y_l93 real,
+            source_table text,
+            source_column text,
+            source_signal_kind text,
+            source_signal_score integer,
+            source_semantic_strength text,
+            xy_precision_class text,
+            xy_discriminance_score integer,
+            same_xy_count_in_city integer,
+            is_reused_xy integer,
+            is_heavily_reused_xy integer
+        );
+
+        create table service_spatial_evidence (
+            service_id text,
+            evidence_type text,
+            seed_type text,
+            target_table text,
+            target_id text,
+            distance_meters real,
+            score integer,
+            rule_name text,
+            context_json text,
+            seed_discriminance_score integer,
+            adjusted_score integer
+        );
+
         create table service_party (
             service_id text,
             role_name text,
@@ -988,7 +1684,17 @@ def create_schema(con: sqlite3.Connection) -> None:
             matched_site_id text,
             matched_site_name text,
             score integer,
-            rule_name text
+            rule_name text,
+            spatial_score integer,
+            spatial_distance_meters real,
+            spatial_rule text,
+            spatial_context_json text,
+            selected_signal_kind text,
+            selected_signal_score integer,
+            selected_signal_raw_value text,
+            spatial_adjusted_score integer,
+            spatial_seed_precision_class text,
+            spatial_seed_reused_xy_count integer
         );
 
         create table service_support_optique (
@@ -1018,7 +1724,16 @@ def create_schema(con: sqlite3.Connection) -> None:
             housing_score integer,
             site_a_optical_id text,
             site_z_optical_id text,
-            optical_context_json text
+            optical_context_json text,
+            spatial_match_rule text,
+            spatial_distance_meters real,
+            spatial_score integer,
+            origin_signal_kind text,
+            origin_signal_score integer,
+            origin_signal_raw_value text,
+            spatial_adjusted_score integer,
+            spatial_seed_precision_class text,
+            spatial_seed_reused_xy_count integer
         );
 
         create table service_support_reseau (
@@ -1142,6 +1857,33 @@ def create_schema(con: sqlite3.Connection) -> None:
             selected_truth_source text,
             gap_flags_json text,
             publication_comment text,
+            spatial_seed_a_label text,
+            spatial_seed_z_label text,
+            spatial_seed_a_source text,
+            spatial_seed_z_source text,
+            spatial_seed_a_x_l93 real,
+            spatial_seed_a_y_l93 real,
+            spatial_seed_z_x_l93 real,
+            spatial_seed_z_y_l93 real,
+            spatial_seed_a_city text,
+            spatial_seed_z_city text,
+            site_a_x_l93 real,
+            site_a_y_l93 real,
+            site_z_x_l93 real,
+            site_z_y_l93 real,
+            spatial_best_object_type text,
+            spatial_best_object_id text,
+            spatial_best_distance_meters real,
+            spatial_confidence_band text,
+            spatial_summary_json text,
+            spatial_seed_a_precision_class text,
+            spatial_seed_z_precision_class text,
+            spatial_seed_a_reused_xy_count integer,
+            spatial_seed_z_reused_xy_count integer,
+            spatial_best_adjusted_score integer,
+            site_a_signal_kind text,
+            site_z_signal_kind text,
+            optical_origin_signal_kind text,
             published_at text
         );
 
@@ -1167,6 +1909,9 @@ def create_schema(con: sqlite3.Connection) -> None:
         create index idx_lea_grouping_key on lea_active_lines(grouping_key);
         create index idx_ref_sites_norm_ref on ref_sites(normalized_reference);
         create index idx_ref_sites_norm_addr on ref_sites(normalized_address);
+        create index idx_ref_ban_normalized_label on ref_ban_address(normalized_label);
+        create index idx_ref_ban_city_street on ref_ban_address(normalized_city, normalized_street_name);
+        create index idx_ref_ban_xy_city on ref_ban_address(normalized_city, x_l93, y_l93);
         create index idx_ref_routes_ref on ref_routes(route_ref);
         create index idx_ref_lease_template_ref on ref_lease_template(ref_exploit);
         create index idx_ref_fiber_lease_ref on ref_fiber_lease(ref_exploit);
@@ -1174,6 +1919,9 @@ def create_schema(con: sqlite3.Connection) -> None:
         create index idx_ref_swag_service on ref_swag_interfaces(service_refs_json);
         create index idx_ref_network_interface_device on ref_network_interfaces(device_name);
         create index idx_ref_network_vlan_device on ref_network_vlans(device_name, vlan_id);
+        create index idx_service_lea_signal_service on service_lea_signal(service_id, signal_kind);
+        create index idx_service_spatial_seed_service on service_spatial_seed(service_id, seed_type);
+        create index idx_service_spatial_evidence_service on service_spatial_evidence(service_id, evidence_type);
         create index idx_service_match_service on service_match_evidence(service_id, score);
         """
     )
@@ -1207,6 +1955,7 @@ def load_lea_active(con: sqlite3.Connection) -> None:
         endpoint_z_raw = str(value(row, "CMD - Secteur géographique2") or "")
         client_contractant = str(value(row, "CMD - Nom client contractant") or "")
         client_final = str(value(row, "Client Final (ADV)") or "")
+        spatial_hints = _collect_spatial_hints(headers, row)
         route_refs = extract_route_refs(command_external, contract_file)
         service_refs = extract_service_refs(command_external, contract_file)
         grouping_key = build_grouping_key(
@@ -1252,13 +2001,14 @@ def load_lea_active(con: sqlite3.Connection) -> None:
                 is_old,
                 grouping_key,
                 source_row,
+                json.dumps(spatial_hints, ensure_ascii=True, sort_keys=True),
             )
         )
 
     con.executemany(
         """
         insert into lea_active_lines values (
-            ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+            ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
         )
         """,
         records,
@@ -1298,10 +2048,113 @@ def iter_gdb_records(layer: str) -> Iterator[dict[str, object]]:
             yield dict(feature["properties"])
 
 
+def load_ban_addresses(con: sqlite3.Connection) -> None:
+    LOG.info("Loading BAN 60 addresses")
+    if not BAN_60_PATH.exists():
+        LOG.warning("BAN file missing, skipping spatial address load: %s", BAN_60_PATH)
+        return
+
+    raw_records: list[dict[str, object]] = []
+    with BAN_60_PATH.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            ban_id = _extract_ban_value(row, "id", "ban_id")
+            if not ban_id:
+                continue
+            department_code = _extract_ban_value(row, "code_departement", "department_code")
+            postcode = _extract_ban_value(row, "code_postal", "postcode")
+            insee_code = _extract_ban_value(row, "code_insee", "insee_code")
+            city = _extract_ban_value(row, "nom_commune", "city", "commune")
+            street_name = _extract_ban_value(row, "nom_voie", "street_name", "voie")
+            house_number = _extract_ban_value(row, "numero", "house_number")
+            suffix = _extract_ban_value(row, "suffixe")
+            if suffix:
+                house_number = f"{house_number}{suffix}" if house_number else suffix
+            full_label = _extract_ban_value(row, "label", "full_label")
+            if not full_label:
+                full_label = " ".join(part for part in [house_number, street_name, postcode, city] if part).strip()
+            lon = _extract_ban_value(row, "lon", "longitude")
+            lat = _extract_ban_value(row, "lat", "latitude")
+            raw_x = _extract_ban_value(row, "x")
+            raw_y = _extract_ban_value(row, "y")
+            try:
+                x_l93 = float(raw_x) if raw_x else None
+                y_l93 = float(raw_y) if raw_y else None
+            except ValueError:
+                x_l93 = None
+                y_l93 = None
+            if x_l93 is None or y_l93 is None:
+                x_l93, y_l93 = _project_wgs84_to_l93(lon, lat)
+            raw_records.append(
+                {
+                    "ban_id": ban_id,
+                    "department_code": department_code,
+                    "insee_code": insee_code,
+                    "postcode": postcode,
+                    "city": city,
+                    "street_name": street_name,
+                    "house_number": house_number,
+                    "full_label": full_label,
+                    "normalized_label": norm_text(full_label),
+                    "normalized_city": _normalize_city(city),
+                    "normalized_street_name": norm_text(street_name),
+                    "lon": float(lon) if lon else None,
+                    "lat": float(lat) if lat else None,
+                    "x_l93": x_l93,
+                    "y_l93": y_l93,
+                }
+            )
+
+    xy_counts: Counter[tuple[str, float, float]] = Counter()
+    for record in raw_records:
+        if record["normalized_city"] and record["x_l93"] is not None and record["y_l93"] is not None:
+            xy_counts[(str(record["normalized_city"]), float(record["x_l93"]), float(record["y_l93"]))] += 1
+
+    records = []
+    for record in raw_records:
+        count = 0
+        if record["normalized_city"] and record["x_l93"] is not None and record["y_l93"] is not None:
+            count = xy_counts[(str(record["normalized_city"]), float(record["x_l93"]), float(record["y_l93"]))]
+        records.append(
+            (
+                record["ban_id"],
+                record["department_code"],
+                record["insee_code"],
+                record["postcode"],
+                record["city"],
+                record["street_name"],
+                record["house_number"],
+                record["full_label"],
+                record["normalized_label"],
+                record["normalized_city"],
+                record["normalized_street_name"],
+                record["lon"],
+                record["lat"],
+                record["x_l93"],
+                record["y_l93"],
+                count,
+                1 if count >= 2 else 0,
+                1 if count >= 10 else 0,
+                _xy_precision_class(count),
+                _xy_discriminance_score(count),
+            )
+        )
+
+    con.executemany(
+        """
+        insert into ref_ban_address values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        records,
+    )
+    con.commit()
+    LOG.info("Loaded %s BAN addresses", len(records))
+
+
 def load_sites(con: sqlite3.Connection) -> None:
     LOG.info("Loading GDB sites")
     records = []
-    for item in iter_gdb_records("Hubsite"):
+    for item, geometry, srid in iter_gdb_features("Hubsite"):
+        geom_x, geom_y = _geometry_to_l93_xy(geometry, srid)
         records.append(
             (
                 str(item.get("MIGRATION_OID") or ""),
@@ -1318,9 +2171,13 @@ def load_sites(con: sqlite3.Connection) -> None:
                 norm_text(item.get("REFERENCE")),
                 norm_text(item.get("USERREFERENCE")),
                 norm_text(item.get("ADRESSE1")),
+                geom_x,
+                geom_y,
+                "gdb_geometry" if geom_x is not None and geom_y is not None else None,
+                srid,
             )
         )
-    con.executemany("insert into ref_sites values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", records)
+    con.executemany("insert into ref_sites values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", records)
     con.commit()
     LOG.info("Loaded %s sites", len(records))
 
@@ -1395,7 +2252,7 @@ def load_routes(con: sqlite3.Connection) -> None:
 
     housing_records: list[tuple] = []
     for layer in ("Rack", "OptPatchPanel", "Room", "Chamber", "Enclosure", "Pedestal", "ISPEnclosure", "ISPManifold"):
-        for item in iter_gdb_records(layer):
+        for item, geometry, srid in iter_gdb_features(layer):
             migration_oid = str(item.get("MIGRATION_OID") or "").strip()
             if not migration_oid:
                 continue
@@ -1411,6 +2268,7 @@ def load_routes(con: sqlite3.Connection) -> None:
             )
             parent_type, parent_migration_oid = parent_by_child.get(migration_oid, (None, None))
             housing_id = f"HSG-{layer.upper()}-{safe_hash([migration_oid, reference, userreference])}"
+            geom_x, geom_y = _geometry_to_l93_xy(geometry, srid)
             housing_records.append(
                 (
                     housing_id,
@@ -1427,6 +2285,10 @@ def load_routes(con: sqlite3.Connection) -> None:
                     site_match.site_name,
                     site_match.rule,
                     site_match.score,
+                    geom_x,
+                    geom_y,
+                    "gdb_geometry" if geom_x is not None and geom_y is not None else None,
+                    srid,
                 )
             )
 
@@ -1453,7 +2315,7 @@ def load_routes(con: sqlite3.Connection) -> None:
 
     cable_records: list[tuple] = []
     cable_hint_records: list[tuple] = []
-    for item in iter_gdb_records("Fiber_Cable"):
+    for item, geometry, srid in iter_gdb_features("Fiber_Cable"):
         migration_oid = str(item.get("MIGRATION_OID") or "").strip()
         if not migration_oid:
             continue
@@ -1465,6 +2327,7 @@ def load_routes(con: sqlite3.Connection) -> None:
         cable_id = f"CAB-{safe_hash([migration_oid, reference, userreference])}"
         site_tokens = extract_place_tokens(reference, userreference, comments)
         fiber_count = extract_fiber_count(reference, userreference, comments, labeltext)
+        geom_start_x, geom_start_y, geom_end_x, geom_end_y, geom_centroid_x, geom_centroid_y = _line_geometry_to_l93_points(geometry, srid)
         cable_records.append(
             (
                 cable_id,
@@ -1482,6 +2345,14 @@ def load_routes(con: sqlite3.Connection) -> None:
                 str(item.get("STATUS") or ""),
                 norm_text(reference or userreference or comments),
                 json.dumps(site_tokens, ensure_ascii=True),
+                geom_start_x,
+                geom_start_y,
+                geom_end_x,
+                geom_end_y,
+                geom_centroid_x,
+                geom_centroid_y,
+                "gdb_geometry" if geom_centroid_x is not None and geom_centroid_y is not None else None,
+                srid,
             )
         )
         for token in site_tokens:
@@ -1489,7 +2360,7 @@ def load_routes(con: sqlite3.Connection) -> None:
             cable_hint_records.append((cable_id, token, base_score, "fiber_cable_name_token"))
 
     con.executemany(
-        "insert into ref_optical_housing values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "insert into ref_optical_housing values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         housing_records,
     )
     con.executemany(
@@ -1501,7 +2372,7 @@ def load_routes(con: sqlite3.Connection) -> None:
         site_link_records,
     )
     con.executemany(
-        "insert into ref_optical_cable values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "insert into ref_optical_cable values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         cable_records,
     )
     con.executemany(
@@ -2011,16 +2882,498 @@ def merge_json_lists(values: Iterable[str]) -> list[str]:
 
 def build_site_index(con: sqlite3.Connection) -> tuple[dict[str, list[tuple]], list[tuple]]:
     rows = con.execute(
-        "select site_id, migration_id, reference, userreference, address1, normalized_reference, normalized_userreference, normalized_address from ref_sites"
+        "select site_id, migration_id, reference, userreference, address1, normalized_reference, normalized_userreference, normalized_address, geom_x, geom_y from ref_sites"
     ).fetchall()
     alias_index: dict[str, list[tuple]] = defaultdict(list)
     for row in rows:
-        site_id, migration_id, reference, userreference, address1, norm_ref, norm_user, norm_address = row
+        site_id = row[0]
+        migration_id = row[1]
+        reference = row[2]
+        userreference = row[3]
+        address1 = row[4]
+        norm_ref = row[5]
+        norm_user = row[6]
+        norm_address = row[7]
         for alias in [site_id, migration_id, reference, userreference, address1, norm_ref, norm_user, norm_address]:
             alias_key = norm_text(alias)
             if alias_key:
                 alias_index[alias_key].append(row)
     return alias_index, rows
+
+
+def _best_ban_match(con: sqlite3.Connection, parsed: dict[str, str]) -> dict[str, object] | None:
+    if not _table_exists(con, "ref_ban_address"):
+        return None
+
+    city = _normalize_city(parsed.get("city"))
+    street = norm_text(parsed.get("street_name"))
+    house_number = parsed.get("house_number", "")
+    postcode = parsed.get("postcode", "")
+    normalized_value = parsed.get("normalized_value", "")
+
+    rows: list[sqlite3.Row] = []
+    if street and city:
+        rows = con.execute(
+            """
+            select * from ref_ban_address
+            where normalized_city = ? and normalized_street_name = ?
+            order by case when house_number = ? and ? <> '' then 0 else 1 end, house_number
+            limit 5
+            """,
+            (city, street, house_number, house_number),
+        ).fetchall()
+    elif normalized_value:
+        rows = con.execute(
+            "select * from ref_ban_address where normalized_label = ? limit 5",
+            (normalized_value,),
+        ).fetchall()
+    elif city and postcode:
+        rows = con.execute(
+            "select * from ref_ban_address where normalized_city = ? and postcode = ? limit 5",
+            (city, postcode),
+        ).fetchall()
+    elif city:
+        rows = con.execute(
+            "select * from ref_ban_address where normalized_city = ? limit 5",
+            (city,),
+        ).fetchall()
+
+    if not rows:
+        return None
+
+    row = rows[0]
+    if street and city:
+        match_rule = "ban_street_city"
+        match_score = 98 if house_number and row["house_number"] == house_number else 90
+    elif normalized_value:
+        match_rule = "ban_full_label_exact"
+        match_score = 94
+    elif city and postcode:
+        match_rule = "ban_city_postcode_only"
+        match_score = 45
+    else:
+        match_rule = "ban_city_only"
+        match_score = 35
+
+    return {
+        "ban_id": row["ban_id"],
+        "match_rule": match_rule,
+        "match_score": match_score,
+        "x_l93": row["x_l93"] if match_score >= 80 else None,
+        "y_l93": row["y_l93"] if match_score >= 80 else None,
+        "city": row["city"],
+        "postcode": row["postcode"],
+        "street_name": row["street_name"],
+        "house_number": row["house_number"],
+        "xy_precision_class": row["xy_precision_class"],
+        "xy_discriminance_score": row["xy_discriminance_score"],
+        "same_xy_count_in_city": row["same_xy_count_in_city"],
+        "is_reused_xy": row["is_reused_xy"],
+        "is_heavily_reused_xy": row["is_heavily_reused_xy"],
+    }
+
+
+def build_service_lea_signals(con: sqlite3.Connection) -> dict[str, list[dict[str, object]]]:
+    con.execute("delete from service_lea_signal")
+    known_cities = {
+        row[0]
+        for row in con.execute("select distinct normalized_city from ref_ban_address where normalized_city <> ''").fetchall()
+        if row[0]
+    }
+    rows_to_insert: list[tuple] = []
+    signals_by_service: dict[str, list[dict[str, object]]] = defaultdict(list)
+    seen_by_service: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
+
+    lea_columns = [
+        "CMD - Secteur géographique2",
+        "CMD - Secteur géographique1",
+        "Client Final (ADV)",
+        "CMD - Numéro commande externe",
+        "nom fichier",
+    ]
+    service_columns = [
+        ("endpoint_a_raw", "service_master_active"),
+        ("endpoint_z_raw", "service_master_active"),
+        ("client_final", "service_master_active"),
+        ("principal_external_ref", "service_master_active"),
+        ("principal_client", "service_master_active"),
+    ]
+
+    service_rows = con.execute(
+        """
+        select s.service_id, bl.lea_line_id, l.*,
+               s.endpoint_a_raw, s.endpoint_z_raw, s.client_final, s.principal_external_ref, s.principal_client
+        from service_master_active s
+        left join service_bss_line bl on bl.service_id = s.service_id
+        left join lea_active_lines l on l.lea_line_id = bl.lea_line_id
+        order by s.service_id, bl.is_principal desc, bl.lea_line_id
+        """
+    ).fetchall()
+
+    for row in service_rows:
+        service_id = row["service_id"]
+        lea_line_id = row["lea_line_id"]
+        spatial_hints_blob = row["spatial_hints_json"] if "spatial_hints_json" in row.keys() else None
+        for column in lea_columns:
+            raw_value = row[column] if column in row.keys() else None
+            classified = classify_lea_signal(raw_value, column, known_cities)
+            if classified is None:
+                continue
+            dedupe_key = (column, classified["normalized_value"], classified["signal_kind"])
+            if dedupe_key in seen_by_service[service_id]:
+                continue
+            seen_by_service[service_id].add(dedupe_key)
+            source_priority = LEA_SIGNAL_SOURCE_PRIORITY.get(column, 10)
+            record = (
+                service_id,
+                lea_line_id,
+                column,
+                source_priority,
+                classified["raw_value"],
+                classified["normalized_value"],
+                classified["signal_kind"],
+                classified["signal_subkind"],
+                classified["signal_score"],
+                classified["semantic_strength"],
+                classified["is_ban_candidate"],
+                classified["is_site_candidate"],
+                classified["is_optical_candidate"],
+                classified["is_route_candidate"],
+                classified["is_noise"],
+                classified["street_hint"],
+                classified["house_number_hint"],
+                classified["city_hint"],
+                classified["postcode_hint"],
+                classified["insee_hint"],
+                classified["route_refs_json"],
+                classified["service_refs_json"],
+                classified["site_tokens_json"],
+                classified["technical_tokens_json"],
+                classified["extraction_rule"],
+                classified["classification_reason_json"],
+            )
+            rows_to_insert.append(record)
+            signals_by_service[service_id].append(
+                {
+                    "service_id": service_id,
+                    "lea_line_id": lea_line_id,
+                    "source_column": column,
+                    "source_priority": source_priority,
+                    **classified,
+                }
+            )
+
+        if spatial_hints_blob:
+            try:
+                hints = json.loads(spatial_hints_blob)
+            except json.JSONDecodeError:
+                hints = {}
+            for column, raw_value in hints.items():
+                classified = classify_lea_signal(raw_value, column, known_cities)
+                if classified is None:
+                    continue
+                dedupe_key = (column, classified["normalized_value"], classified["signal_kind"])
+                if dedupe_key in seen_by_service[service_id]:
+                    continue
+                seen_by_service[service_id].add(dedupe_key)
+                source_priority = LEA_SIGNAL_SOURCE_PRIORITY.get(column, 110)
+                record = (
+                    service_id,
+                    lea_line_id,
+                    column,
+                    source_priority,
+                    classified["raw_value"],
+                    classified["normalized_value"],
+                    classified["signal_kind"],
+                    classified["signal_subkind"],
+                    classified["signal_score"],
+                    classified["semantic_strength"],
+                    classified["is_ban_candidate"],
+                    classified["is_site_candidate"],
+                    classified["is_optical_candidate"],
+                    classified["is_route_candidate"],
+                    classified["is_noise"],
+                    classified["street_hint"],
+                    classified["house_number_hint"],
+                    classified["city_hint"],
+                    classified["postcode_hint"],
+                    classified["insee_hint"],
+                    classified["route_refs_json"],
+                    classified["service_refs_json"],
+                    classified["site_tokens_json"],
+                    classified["technical_tokens_json"],
+                    classified["extraction_rule"],
+                    classified["classification_reason_json"],
+                )
+                rows_to_insert.append(record)
+                signals_by_service[service_id].append(
+                    {
+                        "service_id": service_id,
+                        "lea_line_id": lea_line_id,
+                        "source_column": column,
+                        "source_priority": source_priority,
+                        **classified,
+                    }
+                )
+
+        for column, source_table in service_columns:
+            raw_value = row[column]
+            classified = classify_lea_signal(raw_value, column, known_cities)
+            if classified is None:
+                continue
+            dedupe_key = (column, classified["normalized_value"], classified["signal_kind"])
+            if dedupe_key in seen_by_service[service_id]:
+                continue
+            seen_by_service[service_id].add(dedupe_key)
+            source_priority = LEA_SIGNAL_SOURCE_PRIORITY.get(column, 10)
+            record = (
+                service_id,
+                None,
+                column,
+                source_priority,
+                classified["raw_value"],
+                classified["normalized_value"],
+                classified["signal_kind"],
+                classified["signal_subkind"],
+                classified["signal_score"],
+                classified["semantic_strength"],
+                classified["is_ban_candidate"],
+                classified["is_site_candidate"],
+                classified["is_optical_candidate"],
+                classified["is_route_candidate"],
+                classified["is_noise"],
+                classified["street_hint"],
+                classified["house_number_hint"],
+                classified["city_hint"],
+                classified["postcode_hint"],
+                classified["insee_hint"],
+                classified["route_refs_json"],
+                classified["service_refs_json"],
+                classified["site_tokens_json"],
+                classified["technical_tokens_json"],
+                classified["extraction_rule"],
+                classified["classification_reason_json"],
+            )
+            rows_to_insert.append(record)
+            signals_by_service[service_id].append(
+                {
+                    "service_id": service_id,
+                    "lea_line_id": None,
+                    "source_column": column,
+                    "source_priority": source_priority,
+                    "source_table": source_table,
+                    **classified,
+                }
+            )
+
+    con.executemany(
+        "insert into service_lea_signal values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        rows_to_insert,
+    )
+    con.commit()
+    return signals_by_service
+
+
+def build_service_spatial_seeds(con: sqlite3.Connection) -> dict[str, list[dict[str, object]]]:
+    con.execute("delete from service_spatial_seed")
+    signals_by_service = build_service_lea_signals(con)
+    rows_to_insert: list[tuple] = []
+    seeds_by_service: dict[str, list[dict[str, object]]] = defaultdict(list)
+
+    def append_seed(service_id: str, signal: dict[str, object]) -> None:
+        parsed = parse_address_seed(signal["raw_value"])
+        if not parsed["normalized_value"]:
+            return
+        ban_match = _best_ban_match(con, parsed)
+        raw_ban_score = ban_match["match_score"] if ban_match else 0
+        xy_discriminance_score = ban_match["xy_discriminance_score"] if ban_match else 0
+        effective_score = min(raw_ban_score, int(signal["signal_score"]), xy_discriminance_score) if ban_match else 0
+        row = (
+            service_id,
+            signal["signal_kind"],
+            signal["source_priority"],
+            parsed["raw_value"],
+            parsed["normalized_value"],
+            parsed["street_name"] or None,
+            parsed["house_number"] or None,
+            parsed["city"] or None,
+            parsed["postcode"] or None,
+            signal.get("insee_hint"),
+            ban_match["ban_id"] if ban_match else None,
+            ban_match["match_rule"] if ban_match else None,
+            effective_score,
+            ban_match["x_l93"] if ban_match else None,
+            ban_match["y_l93"] if ban_match else None,
+            "service_lea_signal",
+            signal["source_column"],
+            signal["signal_kind"],
+            signal["signal_score"],
+            signal["semantic_strength"],
+            ban_match["xy_precision_class"] if ban_match else None,
+            ban_match["xy_discriminance_score"] if ban_match else None,
+            ban_match["same_xy_count_in_city"] if ban_match else None,
+            ban_match["is_reused_xy"] if ban_match else 0,
+            ban_match["is_heavily_reused_xy"] if ban_match else 0,
+        )
+        rows_to_insert.append(row)
+        seeds_by_service[service_id].append(
+            {
+                "service_id": service_id,
+                "seed_type": signal["signal_kind"],
+                "seed_priority": signal["source_priority"],
+                "raw_value": parsed["raw_value"],
+                "normalized_value": parsed["normalized_value"],
+                "street_hint": parsed["street_name"],
+                "house_number_hint": parsed["house_number"],
+                "city_hint": parsed["city"],
+                "postcode_hint": parsed["postcode"],
+                "insee_hint": signal.get("insee_hint"),
+                "ban_id": ban_match["ban_id"] if ban_match else None,
+                "match_rule": ban_match["match_rule"] if ban_match else None,
+                "match_score": effective_score,
+                "raw_ban_match_score": raw_ban_score,
+                "x_l93": ban_match["x_l93"] if ban_match else None,
+                "y_l93": ban_match["y_l93"] if ban_match else None,
+                "source_column": signal["source_column"],
+                "source_table": "service_lea_signal",
+                "source_signal_kind": signal["signal_kind"],
+                "source_signal_score": signal["signal_score"],
+                "source_semantic_strength": signal["semantic_strength"],
+                "xy_precision_class": ban_match["xy_precision_class"] if ban_match else None,
+                "xy_discriminance_score": ban_match["xy_discriminance_score"] if ban_match else None,
+                "same_xy_count_in_city": ban_match["same_xy_count_in_city"] if ban_match else None,
+                "is_reused_xy": ban_match["is_reused_xy"] if ban_match else 0,
+                "is_heavily_reused_xy": ban_match["is_heavily_reused_xy"] if ban_match else 0,
+            }
+        )
+
+    for service_id, signals in signals_by_service.items():
+        strong = [
+            signal for signal in signals
+            if signal["is_ban_candidate"] and not signal["is_noise"] and signal["semantic_strength"] == "strong"
+        ]
+        medium = [
+            signal for signal in signals
+            if signal["is_ban_candidate"] and not signal["is_noise"] and signal["semantic_strength"] == "medium"
+        ]
+        weak = [
+            signal for signal in signals
+            if signal["is_ban_candidate"] and not signal["is_noise"] and signal["semantic_strength"] == "weak"
+        ]
+        selected = (
+            sorted(strong, key=lambda item: (item["source_priority"], item["signal_score"]), reverse=True)[:3]
+            + sorted(medium, key=lambda item: (item["source_priority"], item["signal_score"]), reverse=True)[:2]
+            + sorted(weak, key=lambda item: (item["source_priority"], item["signal_score"]), reverse=True)[:2]
+        )
+        seen: set[tuple[str, str]] = set()
+        for signal in selected:
+            dedupe_key = (str(signal["signal_kind"]), str(signal["normalized_value"]))
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            append_seed(service_id, signal)
+
+    con.executemany(
+        """
+        insert into service_spatial_seed values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        rows_to_insert,
+    )
+    con.commit()
+    return seeds_by_service
+
+
+def _select_spatial_seeds_for_endpoint(
+    seeds: list[dict[str, object]],
+    endpoint_label: str,
+) -> list[dict[str, object]]:
+    preferred: list[dict[str, object]] = []
+    fallback: list[dict[str, object]] = []
+    for seed in seeds:
+        source_column = str(seed.get("source_column") or "")
+        signal_kind = str(seed.get("source_signal_kind") or seed.get("seed_type") or "")
+        if source_column == f"endpoint_{endpoint_label.lower()}_raw":
+            preferred.append(seed)
+        elif signal_kind in {"postal_address_precise", "mixed_site_address", "postal_address_partial"}:
+            preferred.append(seed)
+        else:
+            fallback.append(seed)
+    return sorted(
+        preferred or fallback,
+        key=lambda item: (
+            -_semantic_strength_rank(item.get("source_semantic_strength")),
+            -(item.get("seed_priority") or 0),
+            -(item.get("match_score") or 0),
+        ),
+    )
+
+
+def _best_spatial_site_match(
+    endpoint_label: str,
+    seeds: list[dict[str, object]],
+    all_sites: list[tuple],
+) -> dict[str, object] | None:
+    best: dict[str, object] | None = None
+    for seed in _select_spatial_seeds_for_endpoint(seeds, endpoint_label):
+        if seed.get("x_l93") is None or seed.get("y_l93") is None:
+            continue
+        for row in all_sites:
+            distance = _distance_meters(seed["x_l93"], seed["y_l93"], row[8], row[9])
+            raw_score = _spatial_score_for_distance(distance)
+            adjusted_score = min(raw_score, int(seed.get("xy_discriminance_score") or 0), int(seed.get("match_score") or 0))
+            if adjusted_score <= 0:
+                continue
+            candidate = {
+                "site_id": row[0],
+                "site_name": row[2] or row[3] or row[0],
+                "distance_meters": distance,
+                "score": raw_score,
+                "adjusted_score": adjusted_score,
+                "rule": "site_spatial_proximity",
+                "seed": seed,
+            }
+            if best is None or candidate["adjusted_score"] > best["adjusted_score"] or (
+                candidate["adjusted_score"] == best["adjusted_score"] and (candidate["distance_meters"] or 0) < (best["distance_meters"] or 0)
+            ):
+                best = candidate
+    return best
+
+
+def _best_object_spatial_match(
+    seeds: list[dict[str, object]],
+    object_points: list[tuple[object, object]],
+) -> dict[str, object]:
+    best: dict[str, object] = {
+        "distance_meters": None,
+        "raw_score": 0,
+        "adjusted_score": 0,
+        "seed": None,
+    }
+    for seed in seeds:
+        if seed.get("x_l93") is None or seed.get("y_l93") is None:
+            continue
+        for point_x, point_y in object_points:
+            distance = _distance_meters(seed["x_l93"], seed["y_l93"], point_x, point_y)
+            raw_score = _spatial_score_for_distance(distance)
+            adjusted_score = min(raw_score, int(seed.get("xy_discriminance_score") or 0), int(seed.get("match_score") or 0))
+            if adjusted_score <= 0:
+                continue
+            if (
+                best["seed"] is None
+                or adjusted_score > best["adjusted_score"]
+                or (
+                    adjusted_score == best["adjusted_score"]
+                    and distance is not None
+                    and (best["distance_meters"] is None or distance < best["distance_meters"])
+                )
+            ):
+                best = {
+                    "distance_meters": distance,
+                    "raw_score": raw_score,
+                    "adjusted_score": adjusted_score,
+                    "seed": seed,
+                }
+    return best
 
 
 def score_label_match(seeds: Iterable[str], candidate: str) -> int:
@@ -2102,7 +3455,18 @@ def match_site(raw_value: str, alias_index: dict[str, list[tuple]], all_sites: l
 
 def reconcile_services(con: sqlite3.Connection) -> None:
     LOG.info("Reconciling service endpoints and OSS supports")
+    original_row_factory = con.row_factory
+    con.row_factory = sqlite3.Row
     site_index, all_sites = build_site_index(con)
+    seeds_by_service = build_service_spatial_seeds(con)
+    signals_by_service: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    for row in con.execute(
+        """
+        select * from service_lea_signal
+        order by service_id, source_priority desc, signal_score desc, source_column
+        """
+    ).fetchall():
+        signals_by_service[row["service_id"]].append(row)
 
     party_alias_index = {row[0]: row[1] for row in con.execute("select normalized_alias, party_id from party_alias")}
     cpe_by_hostname = {norm_text(row[1]): (row[0], row[1]) for row in con.execute("select cpe_id, hostname from ref_cpe_inventory")}
@@ -2197,7 +3561,8 @@ def reconcile_services(con: sqlite3.Connection) -> None:
         con.execute(
             """
             select cable_id, migration_oid, reference, userreference, comments,
-                   number_of_fibers, normalized_reference, site_tokens_json
+                   number_of_fibers, normalized_reference, site_tokens_json,
+                   geom_start_x, geom_start_y, geom_end_x, geom_end_y, geom_centroid_x, geom_centroid_y
             from ref_optical_cable
             """
         )
@@ -2214,7 +3579,7 @@ def reconcile_services(con: sqlite3.Connection) -> None:
         con.execute(
             """
             select housing_id, housing_type, reference, userreference, description,
-                   comments, site_id, site_name
+                   comments, site_id, site_name, geom_x, geom_y
             from ref_optical_housing
             """
         )
@@ -2285,7 +3650,25 @@ def reconcile_services(con: sqlite3.Connection) -> None:
     optical_records = []
     network_records = []
     evidence_records = []
+    spatial_evidence_records = []
     service_party_records = []
+
+    def _relevant_site_signals(service_id: str, endpoint_label: str) -> list[sqlite3.Row]:
+        preferred_source = f"endpoint_{endpoint_label.lower()}_raw"
+        rows = [
+            row for row in signals_by_service.get(service_id, [])
+            if row["is_site_candidate"] and not row["is_noise"]
+        ]
+        return sorted(
+            rows,
+            key=lambda row: (
+                row["source_column"] == preferred_source,
+                _semantic_strength_rank(row["semantic_strength"]),
+                row["signal_score"] or 0,
+                row["source_priority"] or 0,
+            ),
+            reverse=True,
+        )
 
     def append_optical_record(
         service_id: str,
@@ -2316,6 +3699,15 @@ def reconcile_services(con: sqlite3.Connection) -> None:
         site_a_optical_id: str | None = None,
         site_z_optical_id: str | None = None,
         optical_context: dict[str, object] | None = None,
+        spatial_match_rule: str | None = None,
+        spatial_distance_meters: float | None = None,
+        spatial_score: int | None = None,
+        origin_signal_kind: str | None = None,
+        origin_signal_score: int | None = None,
+        origin_signal_raw_value: str | None = None,
+        spatial_adjusted_score: int | None = None,
+        spatial_seed_precision_class: str | None = None,
+        spatial_seed_reused_xy_count: int | None = None,
     ) -> None:
         optical_records.append(
             (
@@ -2346,6 +3738,15 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                 site_a_optical_id,
                 site_z_optical_id,
                 json.dumps(optical_context or {}, ensure_ascii=True, sort_keys=True),
+                spatial_match_rule,
+                spatial_distance_meters,
+                spatial_score,
+                origin_signal_kind,
+                origin_signal_score,
+                origin_signal_raw_value,
+                spatial_adjusted_score,
+                spatial_seed_precision_class,
+                spatial_seed_reused_xy_count,
             )
         )
 
@@ -2358,23 +3759,121 @@ def reconcile_services(con: sqlite3.Connection) -> None:
         service_id, nature_service, principal_client, principal_external_ref, route_refs_json, service_refs_json, endpoint_a_raw, endpoint_z_raw, client_final = service
         route_refs = json.loads(route_refs_json or "[]")
         service_refs = json.loads(service_refs_json or "[]")
-        service_seeds = [client_final, endpoint_z_raw, endpoint_a_raw, principal_external_ref]
+        service_signal_rows = signals_by_service.get(service_id, [])
+        service_seeds = [
+            row["raw_value"]
+            for row in service_signal_rows
+            if row["signal_kind"] in {"mixed_site_address", "site_label_business", "technical_site_anchor", "weak_business_label", "route_or_service_reference"}
+        ] or [client_final, endpoint_z_raw, endpoint_a_raw, principal_external_ref]
 
         endpoint_matches = {}
         for label, raw_value in [("A", endpoint_a_raw), ("Z", endpoint_z_raw)]:
+            relevant_signals = _relevant_site_signals(service_id, label)
+            signal_matches = [
+                (
+                    row,
+                    match_site(row["raw_value"], site_index, all_sites),
+                )
+                for row in relevant_signals
+            ]
+            signal_matches = [(row, match) for row, match in signal_matches if match.site_id]
+            best_signal_row = None
             match = match_site(raw_value, site_index, all_sites)
-            endpoint_matches[label] = match
-            endpoint_records.append((service_id, label, raw_value, match.site_id, match.site_name, match.score, match.rule))
-            if match.site_id:
+            if signal_matches:
+                best_signal_row, best_signal_match = max(
+                    signal_matches,
+                    key=lambda item: (
+                        item[1].score,
+                        _semantic_strength_rank(item[0]["semantic_strength"]),
+                        item[0]["signal_score"] or 0,
+                    ),
+                )
+                if best_signal_match.score > match.score or (
+                    best_signal_match.score == match.score and best_signal_row["signal_score"] > 0
+                ):
+                    match = best_signal_match
+            spatial_match = _best_spatial_site_match(label, seeds_by_service.get(service_id, []), all_sites)
+            chosen_match = match
+            spatial_score = 0
+            spatial_adjusted_score = 0
+            spatial_distance = None
+            spatial_rule = None
+            spatial_context: dict[str, object] = {}
+            spatial_seed_precision_class = None
+            spatial_seed_reused_xy_count = None
+            if spatial_match is not None:
+                spatial_score = spatial_match["score"]
+                spatial_adjusted_score = spatial_match["adjusted_score"]
+                spatial_distance = round(spatial_match["distance_meters"], 1) if spatial_match["distance_meters"] is not None else None
+                spatial_rule = spatial_match["rule"]
+                spatial_seed_precision_class = spatial_match["seed"].get("xy_precision_class")
+                spatial_seed_reused_xy_count = spatial_match["seed"].get("same_xy_count_in_city")
+                spatial_context = {
+                    "seed_type": spatial_match["seed"]["seed_type"],
+                    "seed_source": spatial_match["seed"]["source_column"],
+                    "seed_city": spatial_match["seed"]["city_hint"],
+                    "seed_precision_class": spatial_seed_precision_class,
+                    "seed_same_xy_count_in_city": spatial_seed_reused_xy_count,
+                    "seed_discriminance_score": spatial_match["seed"].get("xy_discriminance_score"),
+                }
+                spatial_evidence_records.append(
+                    (
+                        service_id,
+                        "site_spatial",
+                        spatial_match["seed"]["seed_type"],
+                        "ref_sites",
+                        spatial_match["site_id"],
+                        spatial_distance,
+                        spatial_score,
+                        spatial_rule,
+                        json.dumps(spatial_context, ensure_ascii=True, sort_keys=True),
+                        spatial_match["seed"].get("xy_discriminance_score"),
+                        spatial_adjusted_score,
+                    )
+                )
+                if (
+                    chosen_match.site_id is None
+                    or (spatial_match["site_id"] == chosen_match.site_id and spatial_adjusted_score > chosen_match.score)
+                    or (chosen_match.score < 72 and spatial_adjusted_score >= 88)
+                ):
+                    chosen_match = SiteMatch(
+                        spatial_match["site_id"],
+                        max(chosen_match.score, spatial_adjusted_score),
+                        spatial_rule,
+                        spatial_match["site_name"],
+                    )
+            endpoint_matches[label] = chosen_match
+            endpoint_records.append(
+                (
+                    service_id,
+                    label,
+                    raw_value,
+                    chosen_match.site_id,
+                    chosen_match.site_name,
+                    chosen_match.score,
+                    chosen_match.rule,
+                    spatial_score or None,
+                    spatial_distance,
+                    spatial_rule,
+                    json.dumps(spatial_context, ensure_ascii=True, sort_keys=True) if spatial_context else None,
+                    best_signal_row["signal_kind"] if best_signal_row is not None else None,
+                    best_signal_row["signal_score"] if best_signal_row is not None else None,
+                    best_signal_row["raw_value"] if best_signal_row is not None else None,
+                    spatial_adjusted_score or None,
+                    spatial_seed_precision_class,
+                    spatial_seed_reused_xy_count,
+                )
+            )
+            if chosen_match.site_id:
                 evidence_records.append(
                     build_evidence(
                         service_id,
                         "site",
-                        match.rule or "site_unknown",
-                        match.score,
+                        chosen_match.rule or "site_unknown",
+                        chosen_match.score,
                         "ref_sites",
-                        match.site_id,
-                        {"endpoint_label": label, "raw_value": raw_value, "site_name": match.site_name},
+                        chosen_match.site_id,
+                        {"endpoint_label": label, "raw_value": raw_value, "site_name": chosen_match.site_name},
                     )
                 )
 
@@ -2679,6 +4178,12 @@ def reconcile_services(con: sqlite3.Connection) -> None:
 
         if nature_service in {"IRU FON", "Location FON"}:
             site_tokens = set(extract_place_tokens(endpoint_a_raw, endpoint_z_raw, client_final, principal_external_ref))
+            technical_signals = [
+                row for row in service_signal_rows
+                if row["signal_kind"] in {"technical_site_anchor", "mixed_site_address", "route_or_service_reference", "site_label_business"}
+            ]
+            for row in technical_signals:
+                site_tokens.update(json.loads(row["site_tokens_json"] or "[]"))
             candidate_cables: dict[str, tuple] = {}
             for token in site_tokens:
                 for cable in cable_by_site_token.get(token, []):
@@ -2691,6 +4196,17 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                 cable_score = 92 if overlap >= 2 else 80
                 if cable[5] is not None and int(cable[5]) <= 24:
                     cable_score = min(96, cable_score + 4)
+                cable_spatial = _best_object_spatial_match(
+                    seeds_by_service.get(service_id, []),
+                    [(cable[8], cable[9]), (cable[10], cable[11]), (cable[12], cable[13])],
+                )
+                cable_distance = cable_spatial["distance_meters"]
+                cable_spatial_score = cable_spatial["raw_score"]
+                cable_spatial_adjusted = cable_spatial["adjusted_score"]
+                cable_seed = cable_spatial["seed"] or {}
+                origin_signal = technical_signals[0] if technical_signals else None
+                if cable_spatial_adjusted:
+                    cable_score = min(98, max(cable_score, cable_spatial_adjusted))
                 append_optical_record(
                     service_id,
                     support_type="cable",
@@ -2705,7 +4221,32 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                         "number_of_fibers": cable[5],
                         "site_tokens": sorted(cable_tokens),
                     },
+                    spatial_match_rule="address_to_cable_endpoint" if cable_spatial_adjusted else None,
+                    spatial_distance_meters=round(cable_distance, 1) if cable_distance is not None else None,
+                    spatial_score=cable_spatial_score or None,
+                    origin_signal_kind=origin_signal["signal_kind"] if origin_signal is not None else None,
+                    origin_signal_score=origin_signal["signal_score"] if origin_signal is not None else None,
+                    origin_signal_raw_value=origin_signal["raw_value"] if origin_signal is not None else None,
+                    spatial_adjusted_score=cable_spatial_adjusted or None,
+                    spatial_seed_precision_class=cable_seed.get("xy_precision_class"),
+                    spatial_seed_reused_xy_count=cable_seed.get("same_xy_count_in_city"),
                 )
+                if cable_spatial_adjusted:
+                    spatial_evidence_records.append(
+                        (
+                            service_id,
+                            "optical_spatial",
+                            cable_seed.get("seed_type") or "address_seed",
+                            "ref_optical_cable",
+                            cable[0],
+                            round(cable_distance, 1) if cable_distance is not None else None,
+                            cable_spatial_score,
+                            "address_to_cable_endpoint",
+                            json.dumps({"reference": cable[2]}, ensure_ascii=True, sort_keys=True),
+                            cable_seed.get("xy_discriminance_score"),
+                            cable_spatial_adjusted,
+                        )
+                    )
                 evidence_records.append(
                     build_evidence(
                         service_id,
@@ -2719,29 +4260,65 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                 )
             if site_a_id:
                 for housing in housing_by_site.get(site_a_id, []):
+                    housing_spatial = _best_object_spatial_match(
+                        seeds_by_service.get(service_id, []),
+                        [(housing[8], housing[9])],
+                    )
+                    housing_distance = housing_spatial["distance_meters"]
+                    housing_spatial_score = housing_spatial["raw_score"]
+                    housing_spatial_adjusted = housing_spatial["adjusted_score"]
+                    housing_seed = housing_spatial["seed"] or {}
+                    origin_signal = technical_signals[0] if technical_signals else None
                     append_optical_record(
                         service_id,
                         support_type="housing",
                         support_ref=housing[0],
                         housing_id=housing[0],
                         housing_match_rule="housing_site_match",
-                        housing_score=78,
+                        housing_score=max(78, housing_spatial_adjusted),
                         site_a_optical_id=site_a_id,
                         site_z_optical_id=site_z_id,
                         optical_context={"reference": housing[2], "description": housing[4], "site_id": housing[6]},
+                        spatial_match_rule="address_to_housing" if housing_spatial_adjusted else None,
+                        spatial_distance_meters=round(housing_distance, 1) if housing_distance is not None else None,
+                        spatial_score=housing_spatial_score or None,
+                        origin_signal_kind=origin_signal["signal_kind"] if origin_signal is not None else None,
+                        origin_signal_score=origin_signal["signal_score"] if origin_signal is not None else None,
+                        origin_signal_raw_value=origin_signal["raw_value"] if origin_signal is not None else None,
+                        spatial_adjusted_score=housing_spatial_adjusted or None,
+                        spatial_seed_precision_class=housing_seed.get("xy_precision_class"),
+                        spatial_seed_reused_xy_count=housing_seed.get("same_xy_count_in_city"),
                     )
             if site_z_id and site_z_id != site_a_id:
                 for housing in housing_by_site.get(site_z_id, []):
+                    housing_spatial = _best_object_spatial_match(
+                        seeds_by_service.get(service_id, []),
+                        [(housing[8], housing[9])],
+                    )
+                    housing_distance = housing_spatial["distance_meters"]
+                    housing_spatial_score = housing_spatial["raw_score"]
+                    housing_spatial_adjusted = housing_spatial["adjusted_score"]
+                    housing_seed = housing_spatial["seed"] or {}
+                    origin_signal = technical_signals[0] if technical_signals else None
                     append_optical_record(
                         service_id,
                         support_type="housing",
                         support_ref=housing[0],
                         housing_id=housing[0],
                         housing_match_rule="housing_site_match",
-                        housing_score=78,
+                        housing_score=max(78, housing_spatial_adjusted),
                         site_a_optical_id=site_a_id,
                         site_z_optical_id=site_z_id,
                         optical_context={"reference": housing[2], "description": housing[4], "site_id": housing[6]},
+                        spatial_match_rule="address_to_housing" if housing_spatial_adjusted else None,
+                        spatial_distance_meters=round(housing_distance, 1) if housing_distance is not None else None,
+                        spatial_score=housing_spatial_score or None,
+                        origin_signal_kind=origin_signal["signal_kind"] if origin_signal is not None else None,
+                        origin_signal_score=origin_signal["signal_score"] if origin_signal is not None else None,
+                        origin_signal_raw_value=origin_signal["raw_value"] if origin_signal is not None else None,
+                        spatial_adjusted_score=housing_spatial_adjusted or None,
+                        spatial_seed_precision_class=housing_seed.get("xy_precision_class"),
+                        spatial_seed_reused_xy_count=housing_seed.get("same_xy_count_in_city"),
                     )
 
         exact_network_hit = False
@@ -2909,26 +4486,43 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                         )
                     )
 
-    con.executemany("insert into service_endpoint values (?,?,?,?,?,?,?)", endpoint_records)
-    con.executemany("insert into service_party values (?,?,?,?,?,?,?)", service_party_records)
     con.executemany(
         """
-        insert into service_support_optique (
-            service_id, route_ref, route_id, route_match_rule, route_score,
-            lease_ref, lease_id, lease_match_rule, lease_score,
-            fiber_lease_id, fiber_lease_match_rule, fiber_lease_score,
-            isp_lease_id, isp_lease_match_rule, isp_lease_score,
-            support_type, support_ref, logical_route_id,
-            cable_id, cable_match_rule, cable_score,
-            housing_id, housing_match_rule, housing_score,
-            site_a_optical_id, site_z_optical_id, optical_context_json
-        ) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        insert into service_endpoint (
+            service_id, endpoint_label, raw_value, matched_site_id, matched_site_name,
+            score, rule_name, spatial_score, spatial_distance_meters, spatial_rule, spatial_context_json,
+            selected_signal_kind, selected_signal_score, selected_signal_raw_value,
+            spatial_adjusted_score, spatial_seed_precision_class, spatial_seed_reused_xy_count
+        ) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
-        optical_records,
+        endpoint_records,
     )
+    con.executemany("insert into service_party values (?,?,?,?,?,?,?)", service_party_records)
+    if optical_records:
+        optical_placeholders = ", ".join("?" for _ in range(len(optical_records[0])))
+        con.executemany(
+            f"""
+            insert into service_support_optique (
+                service_id, route_ref, route_id, route_match_rule, route_score,
+                lease_ref, lease_id, lease_match_rule, lease_score,
+                fiber_lease_id, fiber_lease_match_rule, fiber_lease_score,
+                isp_lease_id, isp_lease_match_rule, isp_lease_score,
+                support_type, support_ref, logical_route_id,
+                cable_id, cable_match_rule, cable_score,
+                housing_id, housing_match_rule, housing_score,
+                site_a_optical_id, site_z_optical_id, optical_context_json,
+                spatial_match_rule, spatial_distance_meters, spatial_score,
+                origin_signal_kind, origin_signal_score, origin_signal_raw_value,
+                spatial_adjusted_score, spatial_seed_precision_class, spatial_seed_reused_xy_count
+            ) values ({optical_placeholders})
+            """,
+            optical_records,
+        )
     con.executemany("insert into service_support_reseau values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", network_records)
     con.executemany("insert into service_match_evidence values (?,?,?,?,?,?,?,?)", evidence_records)
+    con.executemany("insert into service_spatial_evidence values (?,?,?,?,?,?,?,?,?,?,?)", spatial_evidence_records)
     con.commit()
+    con.row_factory = original_row_factory
     LOG.info(
         "Created %s endpoint, %s party, %s optical, %s network links",
         len(endpoint_records),
@@ -2999,7 +4593,15 @@ def build_publication_views(con: sqlite3.Connection) -> None:
         party_rows[(row[0], row[1])].append(row)
 
     endpoint_rows = defaultdict(list)
-    for row in con.execute("select service_id, endpoint_label, raw_value, matched_site_id, matched_site_name, score, rule_name from service_endpoint"):
+    for row in con.execute(
+        """
+        select service_id, endpoint_label, raw_value, matched_site_id, matched_site_name,
+               score, rule_name, spatial_score, spatial_distance_meters, spatial_rule, spatial_context_json,
+               selected_signal_kind, selected_signal_score, selected_signal_raw_value,
+               spatial_adjusted_score, spatial_seed_precision_class, spatial_seed_reused_xy_count
+        from service_endpoint
+        """
+    ):
         endpoint_rows[(row[0], row[1])].append(row)
 
     optical_rows = defaultdict(list)
@@ -3039,6 +4641,8 @@ def build_publication_views(con: sqlite3.Connection) -> None:
                 candidate_scores.append(candidate[20] or 0)
             if len(candidate) > 23:
                 candidate_scores.append(candidate[23] or 0)
+            if len(candidate) > 29:
+                candidate_scores.append(candidate[29] or 0)
             score = max(candidate_scores) if candidate_scores else 0
             if optical_row is None or score > best_optical_score:
                 optical_row = candidate
@@ -3114,12 +4718,23 @@ def build_publication_views(con: sqlite3.Connection) -> None:
                         "best_network_score": best_network_score,
                         "endpoint_a_score": endpoint_a_score,
                         "endpoint_z_score": endpoint_z_score,
+                        "endpoint_a_spatial_score": endpoint_a_row[7] if endpoint_a_row and len(endpoint_a_row) > 7 else None,
+                        "endpoint_z_spatial_score": endpoint_z_row[7] if endpoint_z_row and len(endpoint_z_row) > 7 else None,
+                        "endpoint_a_spatial_adjusted_score": endpoint_a_row[14] if endpoint_a_row and len(endpoint_a_row) > 14 else None,
+                        "endpoint_z_spatial_adjusted_score": endpoint_z_row[14] if endpoint_z_row and len(endpoint_z_row) > 14 else None,
+                        "endpoint_a_signal_kind": endpoint_a_row[11] if endpoint_a_row and len(endpoint_a_row) > 11 else None,
+                        "endpoint_z_signal_kind": endpoint_z_row[11] if endpoint_z_row and len(endpoint_z_row) > 11 else None,
                         "logical_route_id": optical_row[17] if optical_row and len(optical_row) > 17 else None,
                         "cable_id": optical_row[18] if optical_row and len(optical_row) > 18 else None,
                         "housing_id": optical_row[21] if optical_row and len(optical_row) > 21 else None,
                         "optical_site_a": optical_row[24] if optical_row and len(optical_row) > 24 else None,
                         "optical_site_z": optical_row[25] if optical_row and len(optical_row) > 25 else None,
                         "optical_reasoning": optical_context,
+                        "optical_spatial_match_rule": optical_row[27] if optical_row and len(optical_row) > 27 else None,
+                        "optical_spatial_distance_meters": optical_row[28] if optical_row and len(optical_row) > 28 else None,
+                        "optical_spatial_score": optical_row[29] if optical_row and len(optical_row) > 29 else None,
+                        "optical_origin_signal_kind": optical_row[30] if optical_row and len(optical_row) > 30 else None,
+                        "optical_spatial_adjusted_score": optical_row[33] if optical_row and len(optical_row) > 33 else None,
                     },
                     ensure_ascii=True,
                     sort_keys=True,
@@ -3310,6 +4925,71 @@ def _bss_link_map(con: sqlite3.Connection) -> dict[str, dict[str, object]]:
     return links
 
 
+def _spatial_seed_map(con: sqlite3.Connection) -> dict[str, list[sqlite3.Row]]:
+    if not _table_exists(con, "service_spatial_seed"):
+        return {}
+    rows = con.execute(
+        """
+        select *
+        from service_spatial_seed
+        order by service_id, seed_priority desc, match_score desc, source_column
+        """
+    ).fetchall()
+    grouped: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    for row in rows:
+        grouped[row["service_id"]].append(row)
+    return grouped
+
+
+def _site_geometry_by_id(con: sqlite3.Connection) -> dict[str, tuple[float | None, float | None]]:
+    if not _table_exists(con, "ref_sites"):
+        return {}
+    cols = _table_columns(con, "ref_sites")
+    if "geom_x" not in cols or "geom_y" not in cols:
+        return {}
+    return {
+        row["site_id"]: (row["geom_x"], row["geom_y"])
+        for row in con.execute("select site_id, geom_x, geom_y from ref_sites").fetchall()
+    }
+
+
+def _pick_spatial_seed(
+    seeds: list[sqlite3.Row],
+    endpoint_label: str,
+) -> sqlite3.Row | None:
+    label_specific = f"endpoint_{endpoint_label.lower()}_raw"
+    ranked = []
+    for row in seeds:
+        signal_kind = row["source_signal_kind"] or row["seed_type"] or ""
+        priority = row["seed_priority"] or 0
+        match_score = row["match_score"] or 0
+        semantic_strength = _semantic_strength_rank(row["source_semantic_strength"])
+        specificity = 0
+        if row["source_column"] == label_specific:
+            specificity = 4
+        elif signal_kind in {"postal_address_precise", "mixed_site_address"}:
+            specificity = 3
+        elif signal_kind == "postal_address_partial":
+            specificity = 2
+        elif signal_kind in {"postcode_city", "city_only"}:
+            specificity = 1
+        ranked.append((specificity, semantic_strength, priority, match_score, row))
+    ranked.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
+    return ranked[0][3] if ranked else None
+
+
+def _spatial_confidence_from_distance(distance: float | None) -> str:
+    if distance is None:
+        return "none"
+    if distance <= 100:
+        return "strong"
+    if distance <= 200:
+        return "medium"
+    if distance <= 500:
+        return "weak"
+    return "none"
+
+
 def _site_name_for_id(site_id: str | None, site_name_by_id: dict[str, str]) -> str | None:
     if not site_id:
         return None
@@ -3395,6 +5075,8 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
         party_names = _party_name_by_id(con)
         site_name_by_id, site_candidates = _load_ref_site_maps(con)
         bss_links = _bss_link_map(con)
+        spatial_seeds = _spatial_seed_map(con)
+        site_geometry = _site_geometry_by_id(con)
         contract_party_fallback = _best_party_map(con, "contract_party")
         latest_agent = _latest_agent_resolution_map(con)
         validated_agent = {
@@ -3413,6 +5095,9 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
             latest_res = latest_agent.get(service_id)
             validated_res = validated_agent.get(service_id)
             bss_link = bss_links.get(service_id)
+            seed_rows = spatial_seeds.get(service_id, [])
+            spatial_seed_a = _pick_spatial_seed(seed_rows, "A")
+            spatial_seed_z = _pick_spatial_seed(seed_rows, "Z")
             gap_flags: list[str] = []
             note_parts: list[str] = []
 
@@ -3489,6 +5174,12 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
             if not site_z_id:
                 gap_flags.append("missing_site_z")
 
+            site_a_geom = site_geometry.get(site_a_id or "", (None, None))
+            site_z_geom = site_geometry.get(site_z_id or "", (None, None))
+            spatial_best_object_type = None
+            spatial_best_object_id = None
+            spatial_best_distance = None
+
             route_ref = gold["route_ref"] if gold is not None else None
             route_id = gold["route_id"] if gold is not None else None
             lease_id = gold["lease_id"] if gold is not None else None
@@ -3563,6 +5254,17 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
                 gap_flags.append("missing_optical_support")
             if not any((route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id)):
                 gap_flags.append("missing_logical_route_ref")
+            if cable_id:
+                spatial_best_object_type = "cable"
+                spatial_best_object_id = cable_id
+            elif housing_id:
+                spatial_best_object_type = "housing"
+                spatial_best_object_id = housing_id
+            elif route_id or route_ref:
+                spatial_best_object_type = "route"
+                spatial_best_object_id = route_id or route_ref
+            if isinstance(optical_context, dict):
+                spatial_best_distance = optical_context.get("spatial_distance_meters") or gold_summary.get("optical_spatial_distance_meters")
 
             interface_id = gold["interface_id"] if gold is not None else None
             network_interface_id = gold["network_interface_id"] if gold is not None else None
@@ -3626,6 +5328,42 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
                 note_parts.append("bss only")
             if selected_truth_source == "agent_validated" and not note_parts:
                 note_parts.append("validated agent override")
+            if spatial_best_object_type and spatial_best_distance is not None:
+                note_parts.append(
+                    f"spatial {spatial_best_object_type} {round(float(spatial_best_distance), 1)}m"
+                )
+
+            spatial_confidence_band = _spatial_confidence_from_distance(
+                float(spatial_best_distance) if spatial_best_distance is not None else None
+            )
+            spatial_summary = {
+                "seed_a": {
+                    "label": spatial_seed_a["raw_value"] if spatial_seed_a is not None else None,
+                    "source": spatial_seed_a["seed_type"] if spatial_seed_a is not None else None,
+                    "signal_kind": spatial_seed_a["source_signal_kind"] if spatial_seed_a is not None else None,
+                    "semantic_strength": spatial_seed_a["source_semantic_strength"] if spatial_seed_a is not None else None,
+                    "city": spatial_seed_a["city_hint"] if spatial_seed_a is not None else None,
+                    "x_l93": spatial_seed_a["x_l93"] if spatial_seed_a is not None else None,
+                    "y_l93": spatial_seed_a["y_l93"] if spatial_seed_a is not None else None,
+                    "xy_precision_class": spatial_seed_a["xy_precision_class"] if spatial_seed_a is not None else None,
+                    "same_xy_count_in_city": spatial_seed_a["same_xy_count_in_city"] if spatial_seed_a is not None else None,
+                },
+                "seed_z": {
+                    "label": spatial_seed_z["raw_value"] if spatial_seed_z is not None else None,
+                    "source": spatial_seed_z["seed_type"] if spatial_seed_z is not None else None,
+                    "signal_kind": spatial_seed_z["source_signal_kind"] if spatial_seed_z is not None else None,
+                    "semantic_strength": spatial_seed_z["source_semantic_strength"] if spatial_seed_z is not None else None,
+                    "city": spatial_seed_z["city_hint"] if spatial_seed_z is not None else None,
+                    "x_l93": spatial_seed_z["x_l93"] if spatial_seed_z is not None else None,
+                    "y_l93": spatial_seed_z["y_l93"] if spatial_seed_z is not None else None,
+                    "xy_precision_class": spatial_seed_z["xy_precision_class"] if spatial_seed_z is not None else None,
+                    "same_xy_count_in_city": spatial_seed_z["same_xy_count_in_city"] if spatial_seed_z is not None else None,
+                },
+                "best_object_type": spatial_best_object_type,
+                "best_object_id": spatial_best_object_id,
+                "best_distance_meters": spatial_best_distance,
+                "confidence_band": spatial_confidence_band,
+            }
 
             publication_comment = (
                 f"source={selected_truth_source}; "
@@ -3689,11 +5427,38 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
                     selected_truth_source,
                     json.dumps(unique_gap_flags, ensure_ascii=True),
                     publication_comment,
+                    spatial_seed_a["raw_value"] if spatial_seed_a is not None else None,
+                    spatial_seed_z["raw_value"] if spatial_seed_z is not None else None,
+                    spatial_seed_a["seed_type"] if spatial_seed_a is not None else None,
+                    spatial_seed_z["seed_type"] if spatial_seed_z is not None else None,
+                    spatial_seed_a["x_l93"] if spatial_seed_a is not None else None,
+                    spatial_seed_a["y_l93"] if spatial_seed_a is not None else None,
+                    spatial_seed_z["x_l93"] if spatial_seed_z is not None else None,
+                    spatial_seed_z["y_l93"] if spatial_seed_z is not None else None,
+                    spatial_seed_a["city_hint"] if spatial_seed_a is not None else None,
+                    spatial_seed_z["city_hint"] if spatial_seed_z is not None else None,
+                    site_a_geom[0],
+                    site_a_geom[1],
+                    site_z_geom[0],
+                    site_z_geom[1],
+                    spatial_best_object_type,
+                    spatial_best_object_id,
+                    spatial_best_distance,
+                    spatial_confidence_band,
+                    json.dumps(spatial_summary, ensure_ascii=True, sort_keys=True),
+                    spatial_seed_a["xy_precision_class"] if spatial_seed_a is not None else None,
+                    spatial_seed_z["xy_precision_class"] if spatial_seed_z is not None else None,
+                    spatial_seed_a["same_xy_count_in_city"] if spatial_seed_a is not None else None,
+                    spatial_seed_z["same_xy_count_in_city"] if spatial_seed_z is not None else None,
+                    gold_summary.get("optical_spatial_adjusted_score"),
+                    gold_summary.get("endpoint_a_signal_kind"),
+                    gold_summary.get("endpoint_z_signal_kind"),
+                    gold_summary.get("optical_origin_signal_kind"),
                     published_at,
                 )
             )
 
-        placeholders = ", ".join("?" for _ in range(55))
+        placeholders = ", ".join("?" for _ in range(len(rows_to_insert[0]) if rows_to_insert else 0))
         con.executemany(
             f"insert into service_facturable_final values ({placeholders})",
             rows_to_insert,
@@ -3803,6 +5568,13 @@ def build_report(con: sqlite3.Connection) -> None:
         if final_rows
         else []
     )
+    final_with_spatial = (
+        con.execute(
+            "select count(*) from service_facturable_final where spatial_confidence_band is not null and spatial_confidence_band <> 'none'"
+        ).fetchone()[0]
+        if final_rows
+        else 0
+    )
 
     report = [
         "# Active service referential build",
@@ -3842,10 +5614,11 @@ def build_report(con: sqlite3.Connection) -> None:
             f"- Rows with site Z: {final_with_site_z}",
             f"- Rows with network support: {final_with_network}",
             f"- Rows with optical support: {final_with_optical}",
+            f"- Rows with usable spatial evidence: {final_with_spatial}",
             "",
             "## Notes",
             "- Optical matching is built directly from the GDB: logical refs (`TOIP`, `00FT`, `FREE`) plus physical cables and housings.",
-            "- Site matching uses exact aliases, addresses and token overlap on Hubsite names.",
+            "- Site matching uses exact aliases, addresses, BAN geocoding and spatial proximity to GDB objects.",
             "- Network support uses exact SWAG/config refs first, then parsed RANCID VLAN/interface labels and CPE hints.",
             "- Gold and review queue are materialized in SQLite for immediate exploitation.",
             "- `service_facturable_final` is the published billing referential, built with priority `agent_validated > gold > review`.",
@@ -3924,6 +5697,7 @@ def main() -> None:
     con.row_factory = sqlite3.Row
     create_schema(con)
     load_lea_active(con)
+    load_ban_addresses(con)
     load_sites(con)
     load_routes(con)
     load_lease_tables(con)

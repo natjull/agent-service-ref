@@ -5,8 +5,10 @@ description = "Agent IA autonome pour la réconciliation BSS/OSS du référentie
 requires-python = ">=3.10"
 dependencies = [
     "claude-agent-sdk>=0.1.35",
+    "pyproj>=3.7",
     "openpyxl>=3.1",
     "rich>=13.0",
+    "shapely>=2.1",
 ]
 
 [project.scripts]

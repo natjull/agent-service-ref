@@ -105,10 +105,12 @@ Role:
 ### 4.2 Sources OSS optiques
 
 - `GDB_TeloiseV3 (1).zip`
+- `ban-60.csv`
 
 Role:
 
 - source de verite physique et logique du reseau optique,
+- source de geocodage des adresses Oise pour les seeds spatiaux,
 - routes optiques,
 - leases,
 - fibres,
@@ -217,6 +219,9 @@ Referentiels normalises:
 - `ref_optical_connection`
 - `ref_optical_site_link`
 - `ref_optical_cable_site_hint`
+- `ref_ban_address`
+- `service_spatial_seed`
+- `service_spatial_evidence`
 - `ref_routes`
 - `ref_route_parcours`
 - `ref_lease_template`
