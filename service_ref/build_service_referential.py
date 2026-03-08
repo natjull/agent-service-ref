@@ -3921,6 +3921,7 @@ def main() -> None:
         DB_PATH.unlink()
 
     con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
     create_schema(con)
     load_lea_active(con)
     load_sites(con)

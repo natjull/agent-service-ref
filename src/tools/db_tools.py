@@ -377,6 +377,39 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
         )
         else []
     )
+    # Search cables by site tokens matching service endpoints A/Z
+    nearby_cables: list[dict[str, Any]] = []
+    has_cable_table = _row_to_dict(
+        con.execute("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_cable'").fetchone()
+    )
+    if has_cable_table:
+        endpoint_sites = con.execute(
+            "SELECT matched_site_name FROM service_endpoint WHERE service_id = ? AND matched_site_name IS NOT NULL",
+            (service_id,),
+        ).fetchall()
+        site_tokens: list[str] = []
+        for row in endpoint_sites:
+            name = (row["matched_site_name"] or "").upper()
+            for token in re.split(r"[^A-Z0-9]+", name):
+                if len(token) >= 4 and token not in {
+                    "SITE", "POP", "NRA", "TELOISE", "FRANCE", "NORD", "SUD", "EST", "OUEST",
+                    "SAINT", "COMMUNE", "VILLE", "MAIRIE", "AGENCE", "HOTEL",
+                }:
+                    site_tokens.append(token)
+        matched_cable_ids = {r["cable_id"] for r in cable_candidates} if cable_candidates else set()
+        for token in dict.fromkeys(site_tokens):  # deduplicate preserving order
+            if len(nearby_cables) >= 10:
+                break
+            rows = con.execute(
+                "SELECT cable_id, reference, userreference, number_of_fibers, site_tokens_json "
+                "FROM ref_optical_cable WHERE site_tokens_json LIKE ?",
+                (f'%"{token}"%',),
+            ).fetchall()
+            for r in rows:
+                if r["cable_id"] not in matched_cable_ids:
+                    nearby_cables.append(_row_to_dict(r))
+                    matched_cable_ids.add(r["cable_id"])
+
     return {
         "service_id": service_id,
         "gold_optical": _row_to_dict(gold_row),
@@ -385,6 +418,7 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
         "lease_endpoints": _rows_to_dicts(lease_endpoints),
         "cable_candidates": _rows_to_dicts(cable_candidates),
         "housing_candidates": _rows_to_dicts(housing_candidates),
+        "nearby_cables_by_site": nearby_cables,
     }
 
 
