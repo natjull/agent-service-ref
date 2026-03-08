@@ -9,11 +9,19 @@ import sqlite3
 import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 
-import fiona
-import openpyxl
+try:
+    import fiona
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
+    fiona = None
+
+try:
+    import openpyxl
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
+    openpyxl = None
 
 
 LOG = logging.getLogger("service_ref")
@@ -74,6 +82,15 @@ class SiteMatch:
 
 def setup_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+
+def _require_dependency(module: object, package_name: str) -> object:
+    if module is None:
+        raise RuntimeError(
+            f"Missing optional dependency '{package_name}'. Install project data dependencies "
+            f"to run source-loading steps."
+        )
+    return module
 
 
 def norm_text(value: object) -> str:
@@ -520,6 +537,7 @@ def create_schema(con: sqlite3.Connection) -> None:
         drop table if exists service_match_evidence;
         drop table if exists service_review_queue;
         drop table if exists gold_service_active;
+        drop table if exists service_facturable_final;
         drop table if exists override_party_alias;
         drop table if exists override_site_alias;
         drop table if exists override_service_match;
@@ -881,6 +899,58 @@ def create_schema(con: sqlite3.Connection) -> None:
             summary_json text
         );
 
+        create table service_facturable_final (
+            service_id text primary key,
+            service_key text,
+            principal_lea_line_id text,
+            lea_line_ids_json text,
+            line_count integer,
+            active_line_count integer,
+            nature_service text,
+            principal_offer text,
+            principal_external_ref text,
+            principal_internal_ref text,
+            principal_client_raw text,
+            client_final_raw text,
+            contract_party_id text,
+            contract_party_name text,
+            final_party_id text,
+            final_party_name text,
+            final_party_source text,
+            endpoint_a_raw text,
+            endpoint_z_raw text,
+            site_a_id text,
+            site_a_name text,
+            site_a_source text,
+            site_z_id text,
+            site_z_name text,
+            site_z_source text,
+            route_ref text,
+            route_id text,
+            lease_id text,
+            fiber_lease_id text,
+            isp_lease_id text,
+            optical_source text,
+            agent_optical_support_hint text,
+            interface_id text,
+            network_interface_id text,
+            network_vlan_id text,
+            cpe_id text,
+            config_id text,
+            inferred_vlans_json text,
+            network_source text,
+            agent_network_support_hint text,
+            gold_match_state text,
+            gold_confidence_band text,
+            agent_resolution_status text,
+            agent_resolution_confidence text,
+            publication_status text,
+            selected_truth_source text,
+            gap_flags_json text,
+            publication_comment text,
+            published_at text
+        );
+
         create table override_party_alias (
             normalized_alias text primary key,
             forced_party_name text,
@@ -918,7 +988,8 @@ def create_schema(con: sqlite3.Connection) -> None:
 
 def load_lea_active(con: sqlite3.Connection) -> None:
     LOG.info("Loading active LEA lines")
-    wb = openpyxl.load_workbook(LEA_PATH, read_only=True, data_only=True)
+    xl = _require_dependency(openpyxl, "openpyxl")
+    wb = xl.load_workbook(LEA_PATH, read_only=True, data_only=True)
     ws = wb["GLOBAL"]
     rows = ws.iter_rows(values_only=True)
     headers = [str(value) if value is not None else "" for value in next(rows)]
@@ -1027,7 +1098,8 @@ def build_grouping_key(
 
 
 def iter_gdb_records(layer: str) -> Iterator[dict[str, object]]:
-    with fiona.open(GDB_URI, layer=layer) as src:
+    fiona_mod = _require_dependency(fiona, "fiona")
+    with fiona_mod.open(GDB_URI, layer=layer) as src:
         for feature in src:
             yield dict(feature["properties"])
 
@@ -1067,7 +1139,8 @@ def load_routes(con: sqlite3.Connection) -> None:
     ).fetchall()
     con.executemany("insert into ref_routes values (?,?,?,?,?,?)", route_rows)
 
-    wb = openpyxl.load_workbook(ROUTES_XLSX_PATH, read_only=True, data_only=True)
+    xl = _require_dependency(openpyxl, "openpyxl")
+    wb = xl.load_workbook(ROUTES_XLSX_PATH, read_only=True, data_only=True)
     ws = wb["Parcours"]
     rows = ws.iter_rows(values_only=True)
     next(rows)
@@ -1185,7 +1258,8 @@ def load_lease_tables(con: sqlite3.Connection) -> None:
 
 def load_swag_interfaces(con: sqlite3.Connection) -> None:
     LOG.info("Loading SWAG interfaces")
-    wb = openpyxl.load_workbook(SWAG_PATH, read_only=True, data_only=True)
+    xl = _require_dependency(openpyxl, "openpyxl")
+    wb = xl.load_workbook(SWAG_PATH, read_only=True, data_only=True)
     ws = wb["inventaire interface"]
     rows = ws.iter_rows(values_only=True)
     next(rows)
@@ -1216,7 +1290,8 @@ def load_swag_interfaces(con: sqlite3.Connection) -> None:
 
 def load_cpe_inventory(con: sqlite3.Connection) -> None:
     LOG.info("Loading CPE inventory")
-    wb = openpyxl.load_workbook(CPE_PATH, read_only=True, data_only=True)
+    xl = _require_dependency(openpyxl, "openpyxl")
+    wb = xl.load_workbook(CPE_PATH, read_only=True, data_only=True)
     ws = wb["Audit_Inventaire_2901"]
     rows = ws.iter_rows(values_only=True)
     next(rows)
@@ -2103,6 +2178,487 @@ def build_publication_views(con: sqlite3.Connection) -> None:
     LOG.info("Built %s gold services and %s review items", len(gold_rows), len(review_rows))
 
 
+def _table_exists(con: sqlite3.Connection, table_name: str) -> bool:
+    return (
+        con.execute(
+            "select name from sqlite_master where type = 'table' and name = ?",
+            (table_name,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _table_columns(con: sqlite3.Connection, table_name: str) -> set[str]:
+    return {row[1] for row in con.execute(f'pragma table_info("{table_name}")').fetchall()}
+
+
+def _get_row_value(row: sqlite3.Row, key: str, default: object = None) -> object:
+    return row[key] if key in row.keys() else default
+
+
+def _load_ref_site_maps(con: sqlite3.Connection) -> tuple[dict[str, str], dict[str, list[tuple[str, str]]]]:
+    site_cols = _table_columns(con, "ref_sites")
+    name_column = "reference" if "reference" in site_cols else "site_id"
+    alt_name_column = "userreference" if "userreference" in site_cols else None
+    normalized_columns = [col for col in ("normalized_reference", "normalized_userreference", "normalized_address") if col in site_cols]
+
+    site_name_by_id: dict[str, str] = {}
+    site_candidates: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for row in con.execute('select * from ref_sites').fetchall():
+        site_id = row["site_id"]
+        site_name = row[name_column] or site_id
+        site_name_by_id[site_id] = site_name
+
+        seen_keys = {site_id}
+        site_candidates[norm_text(site_id)].append((site_id, site_name))
+        candidate_values = [site_name]
+        if alt_name_column:
+            candidate_values.append(row[alt_name_column])
+        for col in normalized_columns:
+            candidate_values.append(row[col])
+
+        for value in candidate_values:
+            normalized = norm_text(value)
+            if not normalized or normalized in seen_keys:
+                continue
+            site_candidates[normalized].append((site_id, site_name))
+            seen_keys.add(normalized)
+
+    return site_name_by_id, site_candidates
+
+
+def _resolve_agent_site(
+    raw_value: object,
+    site_candidates: dict[str, list[tuple[str, str]]],
+) -> tuple[str | None, str | None, bool]:
+    normalized = norm_text(raw_value)
+    if not normalized:
+        return None, None, False
+    matches = site_candidates.get(normalized, [])
+    if len(matches) != 1:
+        return None, None, bool(matches)
+    site_id, site_name = matches[0]
+    return site_id, site_name, True
+
+
+def _party_name_by_id(con: sqlite3.Connection) -> dict[str, str]:
+    return {
+        row["party_id"]: row["canonical_name"]
+        for row in con.execute("select party_id, canonical_name from party_master").fetchall()
+    }
+
+
+def _latest_agent_resolution_map(con: sqlite3.Connection) -> dict[str, sqlite3.Row]:
+    if not _table_exists(con, "agent_resolutions"):
+        return {}
+    rows = con.execute(
+        """
+        select *
+        from agent_resolutions
+        order by service_id, created_at desc, rowid desc
+        """
+    ).fetchall()
+    latest: dict[str, sqlite3.Row] = {}
+    for row in rows:
+        latest.setdefault(row["service_id"], row)
+    return latest
+
+
+def _latest_validated_agent_resolution_map(con: sqlite3.Connection) -> dict[str, sqlite3.Row]:
+    latest = _latest_agent_resolution_map(con)
+    return {
+        service_id: row
+        for service_id, row in latest.items()
+        if row["status"] == "validated"
+    }
+
+
+def _best_party_map(con: sqlite3.Connection, role_name: str) -> dict[str, str]:
+    rows = con.execute(
+        """
+        select service_id, party_id, score
+        from service_party
+        where role_name = ?
+        order by service_id, score desc, party_id
+        """,
+        (role_name,),
+    ).fetchall()
+    best: dict[str, str] = {}
+    for row in rows:
+        best.setdefault(row["service_id"], row["party_id"])
+    return best
+
+
+def _bss_link_map(con: sqlite3.Connection) -> dict[str, dict[str, object]]:
+    links: dict[str, dict[str, object]] = {}
+    if not _table_exists(con, "service_bss_line"):
+        return links
+
+    rows = con.execute(
+        """
+        select service_id, lea_line_id, role_ligne, is_principal
+        from service_bss_line
+        order by service_id, is_principal desc, lea_line_id
+        """
+    ).fetchall()
+    grouped: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    for row in rows:
+        grouped[row["service_id"]].append(row)
+
+    for service_id, members in grouped.items():
+        principal = next((row for row in members if row["is_principal"] == 1), members[0])
+        links[service_id] = {
+            "principal_lea_line_id": principal["lea_line_id"],
+            "lea_line_ids_json": json.dumps([row["lea_line_id"] for row in members], ensure_ascii=True),
+        }
+    return links
+
+
+def _site_name_for_id(site_id: str | None, site_name_by_id: dict[str, str]) -> str | None:
+    if not site_id:
+        return None
+    return site_name_by_id.get(site_id) or site_id
+
+
+def _resolve_agent_optical(
+    service_id: str,
+    agent_optical_ref: str,
+    optical_rows: dict[str, list[sqlite3.Row]],
+) -> tuple[dict[str, str | None] | None, bool]:
+    if not agent_optical_ref:
+        return None, False
+    normalized = str(agent_optical_ref).strip()
+    if not normalized:
+        return None, False
+
+    for row in optical_rows.get(service_id, []):
+        if normalized in {
+            row["route_ref"],
+            row["route_id"],
+            row["lease_ref"],
+            row["lease_id"],
+            row["fiber_lease_id"],
+            row["isp_lease_id"],
+        }:
+            return {
+                "route_ref": row["route_ref"],
+                "route_id": row["route_id"],
+                "lease_id": row["lease_id"],
+                "fiber_lease_id": row["fiber_lease_id"],
+                "isp_lease_id": row["isp_lease_id"],
+            }, True
+
+    if _table_exists(con := optical_rows[service_id][0].connection if optical_rows.get(service_id) else None, ""):
+        pass
+def _critical_gap_flags(nature_service: str, gap_flags: list[str]) -> list[str]:
+    critical = {
+        "missing_bss_link",
+        "missing_final_party",
+        "missing_site_a",
+    }
+    if nature_service != "Hebergement":
+        critical.add("missing_site_z")
+    if nature_service == "Lan To Lan":
+        critical.add("missing_network_support")
+    if nature_service in {"IRU FON", "Location FON", "FON"}:
+        critical.add("missing_optical_support")
+    return [flag for flag in gap_flags if flag in critical]
+
+
+def build_facturable_publication(con: sqlite3.Connection) -> None:
+    LOG.info("Building facturable publication")
+    original_row_factory = con.row_factory
+    con.row_factory = sqlite3.Row
+    try:
+        con.execute("delete from service_facturable_final")
+
+        services = con.execute("select * from service_master_active order by service_id").fetchall()
+        gold_rows = {
+            row["service_id"]: row
+            for row in con.execute("select * from gold_service_active").fetchall()
+        }
+        party_names = _party_name_by_id(con)
+        site_name_by_id, site_candidates = _load_ref_site_maps(con)
+        bss_links = _bss_link_map(con)
+        contract_party_fallback = _best_party_map(con, "contract_party")
+        latest_agent = _latest_agent_resolution_map(con)
+        validated_agent = {
+            service_id: row for service_id, row in latest_agent.items() if row["status"] == "validated"
+        }
+        optical_by_service: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        for row in con.execute("select * from service_support_optique").fetchall():
+            optical_by_service[row["service_id"]].append(row)
+
+        rows_to_insert = []
+        published_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        for service in services:
+            service_id = service["service_id"]
+            gold = gold_rows.get(service_id)
+            latest_res = latest_agent.get(service_id)
+            validated_res = validated_agent.get(service_id)
+            bss_link = bss_links.get(service_id)
+            gap_flags: list[str] = []
+            note_parts: list[str] = []
+
+            contract_party_id = None
+            if gold is not None:
+                contract_party_id = gold["contract_party_id"]
+            if not contract_party_id:
+                contract_party_id = contract_party_fallback.get(service_id)
+            contract_party_name = party_names.get(contract_party_id or "")
+
+            selected_truth_source = "fallback_bss_only"
+            gold_match_state = gold["match_state"] if gold is not None else None
+            if validated_res is not None:
+                selected_truth_source = "agent_validated"
+            elif gold is not None and gold_match_state == "auto_valid":
+                selected_truth_source = "gold_auto_valid"
+            elif gold is not None:
+                selected_truth_source = "gold_review_required"
+
+            final_party_id = None
+            final_party_source = "missing"
+            if validated_res is not None and (validated_res["party_final_id"] or "").strip():
+                final_party_id = validated_res["party_final_id"]
+                final_party_source = "agent_validated"
+                note_parts.append("party from agent")
+            elif gold is not None and (gold["final_party_id"] or "").strip():
+                final_party_id = gold["final_party_id"]
+                final_party_source = "gold"
+                if selected_truth_source == "agent_validated":
+                    note_parts.append("party from gold")
+            else:
+                gap_flags.append("missing_final_party")
+            final_party_name = party_names.get(final_party_id or "")
+
+            site_a_id = gold["endpoint_a_site_id"] if gold is not None else None
+            site_a_name = _site_name_for_id(site_a_id, site_name_by_id)
+            site_a_source = "gold" if site_a_id else "missing"
+            if validated_res is not None and "resolved_site_a_id" in validated_res.keys() and (validated_res["resolved_site_a_id"] or "").strip():
+                site_a_id = validated_res["resolved_site_a_id"]
+                site_a_name = _site_name_for_id(site_a_id, site_name_by_id)
+                site_a_source = "agent_validated"
+                note_parts.append("site_a from agent")
+            elif validated_res is not None and (validated_res["site_a"] or "").strip():
+                resolved_id, resolved_name, is_unique = _resolve_agent_site(validated_res["site_a"], site_candidates)
+                if resolved_id and is_unique:
+                    site_a_id = resolved_id
+                    site_a_name = resolved_name
+                    site_a_source = "agent_validated"
+                    note_parts.append("site_a from agent")
+                elif not site_a_id:
+                    site_a_source = "agent_hint_unmapped"
+                    gap_flags.append("agent_hint_unmapped")
+            if not site_a_id:
+                gap_flags.append("missing_site_a")
+
+            site_z_id = gold["endpoint_z_site_id"] if gold is not None else None
+            site_z_name = _site_name_for_id(site_z_id, site_name_by_id)
+            site_z_source = "gold" if site_z_id else "missing"
+            if validated_res is not None and "resolved_site_z_id" in validated_res.keys() and (validated_res["resolved_site_z_id"] or "").strip():
+                site_z_id = validated_res["resolved_site_z_id"]
+                site_z_name = _site_name_for_id(site_z_id, site_name_by_id)
+                site_z_source = "agent_validated"
+                note_parts.append("site_z from agent")
+            elif validated_res is not None and (validated_res["site_z"] or "").strip():
+                resolved_id, resolved_name, is_unique = _resolve_agent_site(validated_res["site_z"], site_candidates)
+                if resolved_id and is_unique:
+                    site_z_id = resolved_id
+                    site_z_name = resolved_name
+                    site_z_source = "agent_validated"
+                    note_parts.append("site_z from agent")
+                elif not site_z_id:
+                    site_z_source = "agent_hint_unmapped"
+                    gap_flags.append("agent_hint_unmapped")
+            if not site_z_id:
+                gap_flags.append("missing_site_z")
+
+            route_ref = gold["route_ref"] if gold is not None else None
+            route_id = gold["route_id"] if gold is not None else None
+            lease_id = gold["lease_id"] if gold is not None else None
+            fiber_lease_id = gold["fiber_lease_id"] if gold is not None else None
+            isp_lease_id = gold["isp_lease_id"] if gold is not None else None
+            optical_source = "gold" if any((route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id)) else "missing"
+            agent_optical_support_hint = None
+            if validated_res is not None and any(
+                (
+                    ("route_ref" in validated_res.keys() and (validated_res["route_ref"] or "").strip()),
+                    ("route_id" in validated_res.keys() and (validated_res["route_id"] or "").strip()),
+                    ("lease_id" in validated_res.keys() and (validated_res["lease_id"] or "").strip()),
+                    ("fiber_lease_id" in validated_res.keys() and (validated_res["fiber_lease_id"] or "").strip()),
+                    ("isp_lease_id" in validated_res.keys() and (validated_res["isp_lease_id"] or "").strip()),
+                )
+            ):
+                route_ref = validated_res["route_ref"] if "route_ref" in validated_res.keys() else route_ref
+                route_id = validated_res["route_id"] if "route_id" in validated_res.keys() else route_id
+                lease_id = validated_res["lease_id"] if "lease_id" in validated_res.keys() else lease_id
+                fiber_lease_id = validated_res["fiber_lease_id"] if "fiber_lease_id" in validated_res.keys() else fiber_lease_id
+                isp_lease_id = validated_res["isp_lease_id"] if "isp_lease_id" in validated_res.keys() else isp_lease_id
+                optical_source = "agent_validated"
+                note_parts.append("optical from agent")
+            elif validated_res is not None and (validated_res["optical_support_ref"] or "").strip():
+                agent_optical_support_hint = validated_res["optical_support_ref"]
+                agent_optical_ref = validated_res["optical_support_ref"].strip()
+                remapped = None
+                for row in optical_by_service.get(service_id, []):
+                    if agent_optical_ref in {
+                        row["route_ref"],
+                        row["route_id"],
+                        row["lease_ref"],
+                        row["lease_id"],
+                        row["fiber_lease_id"],
+                        row["isp_lease_id"],
+                    }:
+                        remapped = row
+                        break
+                if remapped is not None:
+                    route_ref = remapped["route_ref"]
+                    route_id = remapped["route_id"]
+                    lease_id = remapped["lease_id"]
+                    fiber_lease_id = remapped["fiber_lease_id"]
+                    isp_lease_id = remapped["isp_lease_id"]
+                    optical_source = "agent_validated"
+                    note_parts.append("optical from agent")
+                elif not any((route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id)):
+                    optical_source = "agent_hint_unmapped"
+                    gap_flags.append("agent_hint_unmapped")
+            if not any((route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id)):
+                gap_flags.append("missing_optical_support")
+
+            interface_id = gold["interface_id"] if gold is not None else None
+            network_interface_id = gold["network_interface_id"] if gold is not None else None
+            network_vlan_id = gold["network_vlan_id"] if gold is not None else None
+            cpe_id = gold["cpe_id"] if gold is not None else None
+            config_id = gold["config_id"] if gold is not None else None
+            inferred_vlans_json = gold["inferred_vlans_json"] if gold is not None else json.dumps([], ensure_ascii=True)
+            network_source = (
+                "gold"
+                if any((interface_id, network_interface_id, network_vlan_id, cpe_id, config_id))
+                else "missing"
+            )
+            agent_network_support_hint = None
+            if validated_res is not None and any(
+                (
+                    ("network_interface_id" in validated_res.keys() and (validated_res["network_interface_id"] or "").strip()),
+                    ("network_vlan_id" in validated_res.keys() and (validated_res["network_vlan_id"] or "").strip()),
+                    ("cpe_id" in validated_res.keys() and (validated_res["cpe_id"] or "").strip()),
+                    ("config_id" in validated_res.keys() and (validated_res["config_id"] or "").strip()),
+                    ("inferred_vlans_json" in validated_res.keys() and (validated_res["inferred_vlans_json"] or "").strip()),
+                )
+            ):
+                network_interface_id = validated_res["network_interface_id"] if "network_interface_id" in validated_res.keys() else network_interface_id
+                network_vlan_id = validated_res["network_vlan_id"] if "network_vlan_id" in validated_res.keys() else network_vlan_id
+                cpe_id = validated_res["cpe_id"] if "cpe_id" in validated_res.keys() else cpe_id
+                config_id = validated_res["config_id"] if "config_id" in validated_res.keys() else config_id
+                inferred_vlans_json = validated_res["inferred_vlans_json"] if "inferred_vlans_json" in validated_res.keys() and validated_res["inferred_vlans_json"] else inferred_vlans_json
+                network_source = "agent_validated"
+                note_parts.append("network from agent")
+            elif validated_res is not None and (validated_res["network_support_id"] or "").strip():
+                agent_network_support_hint = validated_res["network_support_id"]
+                if not any((interface_id, network_interface_id, network_vlan_id, cpe_id, config_id)):
+                    network_source = "agent_hint_unmapped"
+                    gap_flags.append("agent_hint_unmapped")
+            if not any((interface_id, network_interface_id, network_vlan_id, cpe_id, config_id)):
+                gap_flags.append("missing_network_support")
+
+            if bss_link is None:
+                gap_flags.append("missing_bss_link")
+                principal_lea_line_id = None
+                lea_line_ids_json = json.dumps([], ensure_ascii=True)
+            else:
+                principal_lea_line_id = bss_link["principal_lea_line_id"]
+                lea_line_ids_json = bss_link["lea_line_ids_json"]
+
+            unique_gap_flags = sorted(set(gap_flags))
+            critical_gaps = _critical_gap_flags(service["nature_service"], unique_gap_flags)
+
+            if selected_truth_source == "agent_validated" and not critical_gaps:
+                publication_status = "published_validated"
+            elif selected_truth_source in {"gold_auto_valid", "gold_review_required"} and not critical_gaps:
+                publication_status = "published_from_gold"
+            elif critical_gaps:
+                publication_status = "needs_review"
+            else:
+                publication_status = "published_with_gaps"
+
+            if selected_truth_source.startswith("gold") and publication_status == "published_with_gaps" and not note_parts:
+                note_parts.append("published from gold")
+            if selected_truth_source == "fallback_bss_only" and not note_parts:
+                note_parts.append("bss only")
+            if selected_truth_source == "agent_validated" and not note_parts:
+                note_parts.append("validated agent override")
+
+            publication_comment = (
+                f"source={selected_truth_source}; "
+                f"gaps={','.join(unique_gap_flags) if unique_gap_flags else 'none'}; "
+                f"note={', '.join(note_parts) if note_parts else 'aligned'}"
+            )
+
+            rows_to_insert.append(
+                (
+                    service_id,
+                    service["service_key"],
+                    principal_lea_line_id,
+                    lea_line_ids_json,
+                    service["line_count"],
+                    service["active_line_count"],
+                    service["nature_service"],
+                    service["principal_offer"],
+                    service["principal_external_ref"],
+                    service["principal_internal_ref"],
+                    service["principal_client"],
+                    service["client_final"],
+                    contract_party_id,
+                    contract_party_name,
+                    final_party_id,
+                    final_party_name,
+                    final_party_source,
+                    service["endpoint_a_raw"],
+                    service["endpoint_z_raw"],
+                    site_a_id,
+                    site_a_name,
+                    site_a_source,
+                    site_z_id,
+                    site_z_name,
+                    site_z_source,
+                    route_ref,
+                    route_id,
+                    lease_id,
+                    fiber_lease_id,
+                    isp_lease_id,
+                    optical_source,
+                    agent_optical_support_hint,
+                    interface_id,
+                    network_interface_id,
+                    network_vlan_id,
+                    cpe_id,
+                    config_id,
+                    inferred_vlans_json or json.dumps([], ensure_ascii=True),
+                    network_source,
+                    agent_network_support_hint,
+                    gold_match_state,
+                    gold["confidence_band"] if gold is not None else None,
+                    latest_res["status"] if latest_res is not None else None,
+                    latest_res["confidence"] if latest_res is not None else None,
+                    publication_status,
+                    selected_truth_source,
+                    json.dumps(unique_gap_flags, ensure_ascii=True),
+                    publication_comment,
+                    published_at,
+                )
+            )
+
+        placeholders = ", ".join("?" for _ in range(49))
+        con.executemany(
+            f"insert into service_facturable_final values ({placeholders})",
+            rows_to_insert,
+        )
+        con.commit()
+        LOG.info("Built %s final facturable rows", len(rows_to_insert))
+    finally:
+        con.row_factory = original_row_factory
+
+
 def export_csv(con: sqlite3.Connection, query: str, path: Path) -> None:
     rows = con.execute(query)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2146,6 +2702,56 @@ def build_report(con: sqlite3.Connection) -> None:
     party_count = con.execute("select count(*) from party_master").fetchone()[0]
     network_devices = con.execute("select count(*) from ref_network_devices").fetchone()[0]
     network_vlans = con.execute("select count(*) from ref_network_vlans").fetchone()[0]
+    final_rows = con.execute("select count(*) from service_facturable_final").fetchone()[0] if _table_exists(con, "service_facturable_final") else 0
+    final_status_rows = (
+        con.execute(
+            "select publication_status, count(*) from service_facturable_final group by publication_status order by publication_status"
+        ).fetchall()
+        if final_rows
+        else []
+    )
+    final_with_party = (
+        con.execute("select count(*) from service_facturable_final where final_party_id is not null and trim(final_party_id) <> ''").fetchone()[0]
+        if final_rows
+        else 0
+    )
+    final_with_site_a = (
+        con.execute("select count(*) from service_facturable_final where site_a_id is not null and trim(site_a_id) <> ''").fetchone()[0]
+        if final_rows
+        else 0
+    )
+    final_with_site_z = (
+        con.execute("select count(*) from service_facturable_final where site_z_id is not null and trim(site_z_id) <> ''").fetchone()[0]
+        if final_rows
+        else 0
+    )
+    final_with_network = (
+        con.execute(
+            """
+            select count(*) from service_facturable_final
+            where coalesce(interface_id, network_interface_id, network_vlan_id, cpe_id, config_id) is not null
+            """
+        ).fetchone()[0]
+        if final_rows
+        else 0
+    )
+    final_with_optical = (
+        con.execute(
+            """
+            select count(*) from service_facturable_final
+            where coalesce(route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id) is not null
+            """
+        ).fetchone()[0]
+        if final_rows
+        else 0
+    )
+    final_truth_rows = (
+        con.execute(
+            "select selected_truth_source, count(*) from service_facturable_final group by selected_truth_source order by selected_truth_source"
+        ).fetchall()
+        if final_rows
+        else []
+    )
 
     report = [
         "# Active service referential build",
@@ -2176,13 +2782,32 @@ def build_report(con: sqlite3.Connection) -> None:
             f"- Parsed network devices: {network_devices}",
             f"- Parsed network vlan labels: {network_vlans}",
             "",
+            "## Final facturable publication",
+            f"- Published rows: {final_rows}",
+            f"- Rows with final party: {final_with_party}",
+            f"- Rows with site A: {final_with_site_a}",
+            f"- Rows with site Z: {final_with_site_z}",
+            f"- Rows with network support: {final_with_network}",
+            f"- Rows with optical support: {final_with_optical}",
+            "",
             "## Notes",
             "- Route and lease matching use exact technical refs first (`TOIP`, `00FT`, `FREE`, `OPE/L2L`).",
             "- Site matching uses exact aliases, addresses and token overlap on Hubsite names.",
             "- Network support uses exact SWAG/config refs first, then parsed RANCID VLAN/interface labels and CPE hints.",
             "- Gold and review queue are materialized in SQLite for immediate exploitation.",
+            "- `service_facturable_final` is the published billing referential, built with priority `agent_validated > gold > review`.",
         ]
     )
+    if final_status_rows:
+        report.append("")
+        report.append("## Final publication statuses")
+        for status, count in final_status_rows:
+            report.append(f"- {status}: {count}")
+    if final_truth_rows:
+        report.append("")
+        report.append("## Final truth sources")
+        for source, count in final_truth_rows:
+            report.append(f"- {source}: {count}")
     (OUT_DIR / "service_referential_report.md").write_text("\n".join(report), encoding="utf-8")
 
 
@@ -2204,6 +2829,15 @@ def export_outputs(con: sqlite3.Connection) -> None:
         order by s.nature_service, s.principal_client, g.service_id
         """,
         OUT_DIR / "service_master_active.csv",
+    )
+    export_csv(
+        con,
+        """
+        select *
+        from service_facturable_final
+        order by nature_service, principal_client_raw, service_id
+        """,
+        OUT_DIR / "service_facturable_final.csv",
     )
     export_csv(
         con,
@@ -2247,6 +2881,7 @@ def main() -> None:
     build_service_master(con)
     reconcile_services(con)
     build_publication_views(con)
+    build_facturable_publication(con)
     export_outputs(con)
     build_report(con)
     con.close()

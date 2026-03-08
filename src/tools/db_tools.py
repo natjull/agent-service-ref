@@ -260,6 +260,101 @@ def _resolve_party_candidates(con: sqlite3.Connection, service_id: str) -> dict[
     }
 
 
+def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+    gold_cols = {
+        row["name"] for row in con.execute('PRAGMA table_info("gold_service_active")').fetchall()
+    }
+    optical_cols = {
+        row["name"] for row in con.execute('PRAGMA table_info("service_support_optique")').fetchall()
+    }
+    gold_select = [col for col in ("route_ref", "route_id", "lease_id", "fiber_lease_id", "isp_lease_id") if col in gold_cols]
+    optical_select = [
+        col
+        for col in (
+            "route_ref", "route_id", "route_match_rule", "route_score",
+            "lease_ref", "lease_id", "lease_match_rule", "lease_score",
+            "fiber_lease_id", "fiber_lease_match_rule", "fiber_lease_score",
+            "isp_lease_id", "isp_lease_match_rule", "isp_lease_score", "support_type", "support_ref",
+        )
+        if col in optical_cols
+    ]
+
+    gold_row = (
+        con.execute(
+            f'SELECT {", ".join(gold_select)} FROM gold_service_active WHERE service_id = ?',
+            (service_id,),
+        ).fetchone()
+        if gold_select
+        else None
+    )
+    support_rows = (
+        con.execute(
+            f'SELECT {", ".join(optical_select)} FROM service_support_optique WHERE service_id = ?',
+            (service_id,),
+        ).fetchall()
+        if optical_select
+        else []
+    )
+    return {
+        "service_id": service_id,
+        "gold_optical": _row_to_dict(gold_row),
+        "optical_candidates": _rows_to_dicts(support_rows),
+    }
+
+
+def _resolve_network_candidates(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+    gold_cols = {
+        row["name"] for row in con.execute('PRAGMA table_info("gold_service_active")').fetchall()
+    }
+    network_cols = {
+        row["name"] for row in con.execute('PRAGMA table_info("service_support_reseau")').fetchall()
+    }
+    gold_select = [
+        col
+        for col in ("interface_id", "network_interface_id", "network_vlan_id", "cpe_id", "config_id", "inferred_vlans_json")
+        if col in gold_cols
+    ]
+    network_select = [
+        col
+        for col in (
+            "service_ref", "interface_id", "interface_match_rule", "interface_score",
+            "network_interface_id", "network_interface_match_rule", "network_interface_score",
+            "network_vlan_id", "network_vlan_match_rule", "network_vlan_score",
+            "cpe_id", "cpe_match_rule", "cpe_score",
+            "config_id", "config_match_rule", "config_score", "inferred_vlans_json",
+            "device_name", "interface_name",
+        )
+        if col in network_cols
+    ]
+    gold_row = (
+        con.execute(
+            f'SELECT {", ".join(gold_select)} FROM gold_service_active WHERE service_id = ?',
+            (service_id,),
+        ).fetchone()
+        if gold_select
+        else None
+    )
+    support_rows = (
+        con.execute(
+            f'SELECT {", ".join(network_select)} FROM service_support_reseau WHERE service_id = ?',
+            (service_id,),
+        ).fetchall()
+        if network_select
+        else []
+    )
+    payload = {
+        "service_id": service_id,
+        "gold_network": _row_to_dict(gold_row),
+        "network_candidates": _rows_to_dicts(support_rows),
+    }
+    if gold_row and gold_row["inferred_vlans_json"]:
+        payload["gold_network"]["inferred_vlans"] = json.loads(gold_row["inferred_vlans_json"])
+    for row in payload["network_candidates"]:
+        if row.get("inferred_vlans_json"):
+            row["inferred_vlans"] = json.loads(row["inferred_vlans_json"])
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -445,6 +540,48 @@ async def get_service_decision_pack(args: dict[str, Any]) -> dict[str, Any]:
     try:
         payload = _fetch_service_bundle(con, service_id)
         payload["party_candidates"] = _resolve_party_candidates(con, service_id)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "resolve_optical_candidates",
+    "Retourne les supports optiques candidats pour un service, plus le support optique Gold actuel. "
+    "A utiliser quand l'agent doit publier un support optique structure.",
+    {"service_id": str},
+)
+async def resolve_optical_candidates(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _resolve_optical_candidates(con, service_id)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "resolve_network_candidates",
+    "Retourne les supports reseau candidats pour un service, plus le support reseau Gold actuel. "
+    "A utiliser quand l'agent doit publier un support reseau structure.",
+    {"service_id": str},
+)
+async def resolve_network_candidates(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _resolve_network_candidates(con, service_id)
         return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     except Exception as e:
         return _text(f"ERROR: {e}")

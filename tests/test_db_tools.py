@@ -13,6 +13,8 @@ _query_db = db_tools.query_db.handler
 _list_tables = db_tools.list_tables.handler
 _describe_table = db_tools.describe_table.handler
 _fetch_ctx = db_tools.fetch_service_context.handler
+_resolve_network_candidates = db_tools.resolve_network_candidates.handler
+_resolve_optical_candidates = db_tools.resolve_optical_candidates.handler
 _resolve_party = db_tools.resolve_party_candidates.handler
 
 
@@ -115,3 +117,17 @@ class TestResolvePartyCandidates:
         assert '"pipeline_contract_parties"' in text
         assert '"recommended_final_party_id": "P-ACME"' in text
         assert '"reason": "exact alias match on client_final_raw"' in text
+
+
+class TestStructuredCandidateResolvers:
+    def test_returns_optical_candidates(self):
+        result = _run(_resolve_optical_candidates({"service_id": "SVC-001"}))
+        text = result["content"][0]["text"]
+        assert '"optical_candidates"' in text
+        assert '"gold_optical"' in text
+
+    def test_returns_network_candidates(self):
+        result = _run(_resolve_network_candidates({"service_id": "SVC-001"}))
+        text = result["content"][0]["text"]
+        assert '"network_candidates"' in text
+        assert '"gold_network"' in text

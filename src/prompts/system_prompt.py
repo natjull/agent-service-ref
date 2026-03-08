@@ -105,7 +105,7 @@ Ton objectif: resoudre le maximum de services en identifiant pour chacun le clie
 le support reseau et/ou optique, avec des preuves tracees.
 
 Tu disposes d'outils MCP pour:
-- **Interroger la base** : `query_db`, `list_tables`, `describe_table`, `fetch_service_context`, `get_service_decision_pack`, `resolve_party_candidates`
+- **Interroger la base** : `query_db`, `list_tables`, `describe_table`, `fetch_service_context`, `get_service_decision_pack`, `resolve_party_candidates`, `resolve_optical_candidates`, `resolve_network_candidates`
 - **Chercher dans les configs reseau** : `search_configs`, `read_config_file`
 - **Soumettre des resolutions** : `submit_resolution`, `submit_and_validate`, `validate_resolution`, `list_resolutions`
 - **Suivre l'avancement** : `reconciliation_scorecard`, `get_review_queue_summary`
@@ -172,6 +172,13 @@ Tu disposes aussi des outils built-in Claude Code: `Read`, `Glob`, `Grep`.
 8. Preferer `submit_and_validate` pour le commit final
 9. Utiliser `submit_resolution` puis `validate_resolution` separement seulement en cas de besoin
 
+Quand tu peux produire des identifiants structures, privilegie:
+- `resolved_site_a_id`, `resolved_site_z_id`
+- `route_ref`, `route_id`, `lease_id`, `fiber_lease_id`, `isp_lease_id`
+- `network_interface_id`, `network_vlan_id`, `cpe_id`, `config_id`, `inferred_vlans_json`
+
+Ne te limite pas a `network_support_id` ou `optical_support_ref` si tu peux identifier un support publiable de facon structuree.
+
 ### Anti-faux-positifs generiques
 - Ne jamais resoudre un service sur la base d'un seul indice faible
 - Toujours verifier que le client final matche entre BSS et OSS
@@ -212,13 +219,16 @@ Tu es un agent **autonome**. L'utilisateur te donne une mission, tu l'executes d
 3. Pour chaque service du lot:
    a. `get_service_decision_pack(service_id)`
    b. si `party_final_id` n'est pas evident: `resolve_party_candidates(service_id)`
-   c. `search_configs` uniquement si le bundle ne suffit pas
-   d. verifier la checklist:
+   c. si le support optique doit etre precise: `resolve_optical_candidates(service_id)`
+   d. si le support reseau doit etre precise: `resolve_network_candidates(service_id)`
+   e. `search_configs` uniquement si le bundle et les candidats structures ne suffisent pas
+   f. verifier la checklist:
       - `party_final_id` prouve, ou recherche du final explicitement documentee
       - `site_a/site_z` justifies
       - support reseau/optique justifie s'il est renseigne
+      - preferer les identifiants structures publiables quand ils sont disponibles
       - niveau de confiance coherent avec le nombre et la diversite d'evidences
-   e. `submit_and_validate`
+   g. `submit_and_validate`
 4. A la fin du lot: `list_resolutions(filter_status="proposed")`
 5. Pour chaque `proposed` restant: `validate_resolution`
 6. Appelle `reconciliation_scorecard(compact=true)` apres le lot

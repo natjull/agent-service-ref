@@ -50,6 +50,8 @@ from .tools.db_tools import (
     describe_table,
     fetch_service_context,
     get_service_decision_pack,
+    resolve_network_candidates,
+    resolve_optical_candidates,
     resolve_party_candidates,
 )
 from .tools.config_tools import search_configs, read_config_file
@@ -76,6 +78,8 @@ def create_service_ref_server():
             describe_table,
             fetch_service_context,
             get_service_decision_pack,
+            resolve_optical_candidates,
+            resolve_network_candidates,
             resolve_party_candidates,
             # Config tools
             search_configs,
@@ -138,6 +142,8 @@ def create_agent_options(
             "mcp__service-ref__describe_table",
             "mcp__service-ref__fetch_service_context",
             "mcp__service-ref__get_service_decision_pack",
+            "mcp__service-ref__resolve_optical_candidates",
+            "mcp__service-ref__resolve_network_candidates",
             "mcp__service-ref__resolve_party_candidates",
             "mcp__service-ref__search_configs",
             "mcp__service-ref__read_config_file",
@@ -200,6 +206,10 @@ def _tool_summary(block: ToolUseBlock) -> str:
         return f"search_configs — {inp.get('pattern', '?')}"
     elif name == "get_service_decision_pack":
         return f"get_service_decision_pack — {inp.get('service_id', '?')}"
+    elif name == "resolve_optical_candidates":
+        return f"resolve_optical_candidates — {inp.get('service_id', '?')}"
+    elif name == "resolve_network_candidates":
+        return f"resolve_network_candidates — {inp.get('service_id', '?')}"
     elif name == "submit_resolution":
         return f"submit_resolution — {inp.get('service_id', '?')}"
     elif name == "submit_and_validate":

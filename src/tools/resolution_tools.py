@@ -27,6 +27,18 @@ CREATE TABLE IF NOT EXISTS agent_resolutions (
     optical_support_ref TEXT,
     party_final TEXT,
     party_final_id TEXT,
+    resolved_site_a_id TEXT,
+    resolved_site_z_id TEXT,
+    route_ref TEXT,
+    route_id TEXT,
+    lease_id TEXT,
+    fiber_lease_id TEXT,
+    isp_lease_id TEXT,
+    network_interface_id TEXT,
+    network_vlan_id TEXT,
+    cpe_id TEXT,
+    config_id TEXT,
+    inferred_vlans_json TEXT,
     justification TEXT NOT NULL,
     status TEXT DEFAULT 'proposed',
     evidence_count INTEGER DEFAULT 0
@@ -46,6 +58,20 @@ CREATE TABLE IF NOT EXISTS agent_evidence (
 """
 
 _MIN_EVIDENCE = {"high": 3, "medium": 2, "low": 1}
+_AGENT_RESOLUTION_COLUMNS = {
+    "resolved_site_a_id": "TEXT",
+    "resolved_site_z_id": "TEXT",
+    "route_ref": "TEXT",
+    "route_id": "TEXT",
+    "lease_id": "TEXT",
+    "fiber_lease_id": "TEXT",
+    "isp_lease_id": "TEXT",
+    "network_interface_id": "TEXT",
+    "network_vlan_id": "TEXT",
+    "cpe_id": "TEXT",
+    "config_id": "TEXT",
+    "inferred_vlans_json": "TEXT",
+}
 
 
 def configure(db_path: Path) -> None:
@@ -72,6 +98,14 @@ def ensure_agent_tables(db_path: Path) -> None:
     con = sqlite3.connect(str(db_path))
     try:
         con.executescript(AGENT_SCHEMA_SQL)
+        existing_columns = {
+            row[1] for row in con.execute("PRAGMA table_info(agent_resolutions)").fetchall()
+        }
+        for column_name, column_type in _AGENT_RESOLUTION_COLUMNS.items():
+            if column_name not in existing_columns:
+                con.execute(
+                    f'ALTER TABLE agent_resolutions ADD COLUMN "{column_name}" {column_type}'
+                )
         con.commit()
     finally:
         con.close()
@@ -120,6 +154,8 @@ async def submit_resolution(args: dict[str, Any]) -> dict[str, Any]:
     except json.JSONDecodeError as e:
         return _text(f"ERROR: Invalid JSON: {e}")
 
+    if _db_path is not None:
+        ensure_agent_tables(_db_path)
     con = _connect()
     try:
         # Validate service exists
@@ -191,14 +227,23 @@ async def submit_resolution(args: dict[str, Any]) -> dict[str, Any]:
             )
 
         resolution_id = _safe_hash([service_id, datetime.now().isoformat()])
+        inferred_vlans = resolution.get("inferred_vlans_json")
+        if inferred_vlans is None and resolution.get("inferred_vlans") is not None:
+            inferred_vlans = resolution.get("inferred_vlans")
+        if isinstance(inferred_vlans, (list, dict)):
+            inferred_vlans = json.dumps(inferred_vlans, ensure_ascii=True)
 
         # Insert resolution
         con.execute(
             """INSERT OR REPLACE INTO agent_resolutions
             (resolution_id, service_id, confidence,
              site_a, site_z, network_support_id, optical_support_ref,
-             party_final, party_final_id, justification, status, evidence_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)""",
+             party_final, party_final_id,
+             resolved_site_a_id, resolved_site_z_id,
+             route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id,
+             network_interface_id, network_vlan_id, cpe_id, config_id, inferred_vlans_json,
+             justification, evidence_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 resolution_id,
                 service_id,
@@ -209,6 +254,18 @@ async def submit_resolution(args: dict[str, Any]) -> dict[str, Any]:
                 resolution.get("optical_support_ref"),
                 resolution.get("party_final"),
                 party_final_id or None,
+                resolution.get("resolved_site_a_id"),
+                resolution.get("resolved_site_z_id"),
+                resolution.get("route_ref"),
+                resolution.get("route_id"),
+                resolution.get("lease_id"),
+                resolution.get("fiber_lease_id"),
+                resolution.get("isp_lease_id"),
+                resolution.get("network_interface_id"),
+                resolution.get("network_vlan_id"),
+                resolution.get("cpe_id"),
+                resolution.get("config_id"),
+                inferred_vlans,
                 justification,
                 len(evidences),
             ),
