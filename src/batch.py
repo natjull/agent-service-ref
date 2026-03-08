@@ -5,8 +5,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from rich.console import Console
+
 from .agent import create_agent_options, _process_stream
 from .sdk_compat import ClaudeSDKClient
+
+_batch_console = Console(stderr=True)
 
 
 def _count_proposed(db_path: Path) -> int | None:
@@ -37,8 +41,8 @@ async def batch_run(prompt: str, workspace: str = ".", model: str = "opus") -> t
         await client.query(prompt)
         text_blocks, hit_max_turns, cost, turns = await _process_stream(
             client,
-            rich_console=None,
-            spinner=False,
+            rich_console=_batch_console,
+            spinner=True,
         )
         total_cost_usd += cost
         total_turns += turns
@@ -54,8 +58,8 @@ async def batch_run(prompt: str, workspace: str = ".", model: str = "opus") -> t
             await client.query("continue")
             text_blocks, hit_max_turns, cost, turns = await _process_stream(
                 client,
-                rich_console=None,
-                spinner=False,
+                rich_console=_batch_console,
+                spinner=True,
             )
             total_cost_usd += cost
             total_turns += turns
@@ -72,8 +76,8 @@ async def batch_run(prompt: str, workspace: str = ".", model: str = "opus") -> t
             )
             text_blocks, _, cost, turns = await _process_stream(
                 client,
-                rich_console=None,
-                spinner=False,
+                rich_console=_batch_console,
+                spinner=True,
             )
             total_cost_usd += cost
             total_turns += turns
