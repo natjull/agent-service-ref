@@ -123,7 +123,12 @@ def extract_place_tokens(*values: object) -> list[str]:
         if not normalized:
             continue
         for token in PLACE_TOKEN_PATTERN.findall(normalized):
-            if token.isdigit() or len(token) < 4 or token in BUSINESS_STOPWORDS:
+            if (
+                token.isdigit()
+                or len(token) < 4
+                or token in BUSINESS_STOPWORDS
+                or token.endswith("FO")
+            ):
                 continue
             if token not in seen:
                 tokens.append(token)
@@ -202,6 +207,11 @@ BUSINESS_STOPWORDS = {
     "CPEDSP",
     "CLIENTLAN2LAN",
     "CLIENTL2L",
+    "TELOISE",
+    "BAIE",
+    "HOTEL",
+    "POLICE",
+    "RUE",
 }
 
 INTERFACE_START_RE = re.compile(r"^interface\s+(.+)$", re.IGNORECASE)
