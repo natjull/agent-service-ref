@@ -2055,12 +2055,23 @@ def load_ban_addresses(con: sqlite3.Connection) -> None:
         return
 
     raw_records: list[dict[str, object]] = []
+    seen_ban_ids: set[str] = set()
     with BAN_60_PATH.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
+        sample = handle.read(4096)
+        handle.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;")
+        except csv.Error:
+            dialect = csv.excel
+            dialect.delimiter = ";"
+        reader = csv.DictReader(handle, dialect=dialect)
         for row in reader:
             ban_id = _extract_ban_value(row, "id", "ban_id")
             if not ban_id:
                 continue
+            if ban_id in seen_ban_ids:
+                continue
+            seen_ban_ids.add(ban_id)
             department_code = _extract_ban_value(row, "code_departement", "department_code")
             postcode = _extract_ban_value(row, "code_postal", "postcode")
             insee_code = _extract_ban_value(row, "code_insee", "insee_code")
@@ -4975,7 +4986,7 @@ def _pick_spatial_seed(
             specificity = 1
         ranked.append((specificity, semantic_strength, priority, match_score, row))
     ranked.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
-    return ranked[0][3] if ranked else None
+    return ranked[0][4] if ranked else None
 
 
 def _spatial_confidence_from_distance(distance: float | None) -> str:
