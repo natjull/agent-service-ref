@@ -31,9 +31,7 @@ OUT_DIR = ROOT / "service_ref" / "output"
 DB_PATH = OUT_DIR / "service_referential.sqlite"
 
 LEA_PATH = ROOT / "6-3_20260203_Suivi_Contrats_LEA.xlsx"
-GPKG_PATH = ROOT / "hello_gracethd.gpkg"
 GDB_ZIP_PATH = ROOT / "GDB_TeloiseV3 (1).zip"
-ROUTES_XLSX_PATH = ROOT / "routes_optiques_pur_gdb_TELOISE (2).xlsx"
 SWAG_PATH = ROOT / "unzipped_equip" / "Export inventaire SWAG.xlsx"
 CPE_PATH = ROOT / "unzipped_equip" / "Inventaire CPE Teloise Janv26.xlsx"
 CONFIG_DIR = ROOT / "unzipped_equip"
@@ -70,6 +68,12 @@ SERVICE_PATTERN = re.compile(
 VLAN_LINE_PATTERN = re.compile(r"\bvlan\s+(\d+)\b", re.IGNORECASE)
 HOSTNAME_PATTERN = re.compile(r"\bsysname\s+([^\s]+)|\bhostname\s+([^\s]+)", re.IGNORECASE)
 HEADER_PATTERN = re.compile(r'header shell information\s+"([^"]+)"', re.IGNORECASE)
+CABLE_FIBERS_PATTERN = re.compile(r"\b(\d{1,3})\s*FO\b", re.IGNORECASE)
+PLACE_TOKEN_PATTERN = re.compile(r"[A-Z0-9]{3,}")
+HOUSING_SITE_RELATION_LAYERS = {
+    "Chamber__Hubsite": ("Chamber", "CHAMBER_MIGRATION_OID", "HUBSITE_MIGRATION_OID"),
+    "SupportStructure__Hubsite": ("SupportStructure", "SUPPORTSTRUCTURE_MIGRATION_OID", "HUBSITE_MIGRATION_OID"),
+}
 
 
 @dataclass
@@ -104,6 +108,39 @@ def norm_text(value: object) -> str:
 
 def norm_slug(value: object) -> str:
     return norm_text(value).replace(" ", "_")
+
+
+def infer_route_ref(*values: object) -> str | None:
+    refs = extract_route_refs(*values)
+    return refs[0] if refs else None
+
+
+def extract_place_tokens(*values: object) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = norm_text(value)
+        if not normalized:
+            continue
+        for token in PLACE_TOKEN_PATTERN.findall(normalized):
+            if token.isdigit() or len(token) < 4 or token in BUSINESS_STOPWORDS:
+                continue
+            if token not in seen:
+                tokens.append(token)
+                seen.add(token)
+    return tokens
+
+
+def extract_fiber_count(*values: object) -> int | None:
+    for value in values:
+        text = "" if value is None else str(value)
+        match = CABLE_FIBERS_PATTERN.search(text)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                continue
+    return None
 
 
 ROLE_BY_OFFER_NORMALIZED = {norm_text(key): value for key, value in ROLE_BY_OFFER.items()}
@@ -515,6 +552,14 @@ def create_schema(con: sqlite3.Connection) -> None:
         """
         drop table if exists lea_active_lines;
         drop table if exists ref_sites;
+        drop table if exists ref_optical_logical_route;
+        drop table if exists ref_optical_lease;
+        drop table if exists ref_optical_lease_endpoint;
+        drop table if exists ref_optical_cable;
+        drop table if exists ref_optical_housing;
+        drop table if exists ref_optical_connection;
+        drop table if exists ref_optical_site_link;
+        drop table if exists ref_optical_cable_site_hint;
         drop table if exists ref_routes;
         drop table if exists ref_route_parcours;
         drop table if exists ref_lease_template;
@@ -588,6 +633,127 @@ def create_schema(con: sqlite3.Connection) -> None:
             normalized_reference text,
             normalized_userreference text,
             normalized_address text
+        );
+
+        create table ref_optical_logical_route (
+            logical_route_id text primary key,
+            route_ref text,
+            source_layer text,
+            source_oid text,
+            ref_exploit text,
+            reference text,
+            path_id text,
+            pair_oid text,
+            feature_type text,
+            lessee text,
+            client text,
+            network text,
+            status text,
+            comments text,
+            normalized_label text
+        );
+
+        create table ref_optical_lease (
+            optical_lease_id text primary key,
+            lease_kind text,
+            source_layer text,
+            source_oid text,
+            ref_exploit text,
+            reference text,
+            path_id text,
+            pair_oid text,
+            feature text,
+            lessee text,
+            client text,
+            network text,
+            status text,
+            comments text,
+            normalized_label text
+        );
+
+        create table ref_optical_lease_endpoint (
+            optical_lease_id text,
+            endpoint_label text,
+            housing_type text,
+            housing_migration_oid text,
+            object_type text,
+            object_migration_oid text,
+            connector_start integer,
+            connector_end integer,
+            reference_label text,
+            site_id text,
+            site_name text,
+            site_resolution_rule text,
+            site_score integer
+        );
+
+        create table ref_optical_cable (
+            cable_id text primary key,
+            migration_oid text,
+            migration_id text,
+            reference text,
+            userreference text,
+            comments text,
+            labeltext text,
+            location text,
+            number_of_fibers integer,
+            cable_type text,
+            network text,
+            project_code text,
+            status text,
+            normalized_reference text,
+            site_tokens_json text
+        );
+
+        create table ref_optical_housing (
+            housing_id text primary key,
+            migration_oid text,
+            housing_type text,
+            reference text,
+            userreference text,
+            description text,
+            comments text,
+            location text,
+            parent_type text,
+            parent_migration_oid text,
+            site_id text,
+            site_name text,
+            site_resolution_rule text,
+            site_score integer
+        );
+
+        create table ref_optical_connection (
+            connection_id text primary key,
+            housing_type text,
+            housing_migration_oid text,
+            obj1_type text,
+            obj1_migration_oid text,
+            obj1_connector1 integer,
+            obj1_connector2 integer,
+            obj2_type text,
+            obj2_migration_oid text,
+            obj2_connector1 integer,
+            obj2_connector2 integer,
+            branch_type text,
+            tray_migration_id text,
+            rattachement_id integer
+        );
+
+        create table ref_optical_site_link (
+            object_type text,
+            object_migration_oid text,
+            site_id text,
+            site_name text,
+            rule_name text,
+            score integer,
+            source_layer text
+        );
+
+        create table ref_optical_cable_site_hint (
+            cable_id text,
+            site_token text,
+            score integer,
+            hint_rule text
         );
 
         create table ref_routes (
@@ -830,7 +996,19 @@ def create_schema(con: sqlite3.Connection) -> None:
             fiber_lease_score integer,
             isp_lease_id text,
             isp_lease_match_rule text,
-            isp_lease_score integer
+            isp_lease_score integer,
+            support_type text,
+            support_ref text,
+            logical_route_id text,
+            cable_id text,
+            cable_match_rule text,
+            cable_score integer,
+            housing_id text,
+            housing_match_rule text,
+            housing_score integer,
+            site_a_optical_id text,
+            site_z_optical_id text,
+            optical_context_json text
         );
 
         create table service_support_reseau (
@@ -930,6 +1108,12 @@ def create_schema(con: sqlite3.Connection) -> None:
             lease_id text,
             fiber_lease_id text,
             isp_lease_id text,
+            logical_route_id text,
+            cable_id text,
+            housing_id text,
+            optical_site_a_id text,
+            optical_site_z_id text,
+            optical_context_json text,
             optical_source text,
             agent_optical_support_hint text,
             interface_id text,
@@ -1131,53 +1315,286 @@ def load_sites(con: sqlite3.Connection) -> None:
     LOG.info("Loaded %s sites", len(records))
 
 
-def load_routes(con: sqlite3.Connection) -> None:
-    LOG.info("Loading GraceTHD routes and parcours")
-    gpkg = sqlite3.connect(GPKG_PATH)
-    route_rows = gpkg.execute(
-        "select ro_code, ro_ref_exploit, ro_reseau, ro_client, ro_lessee, ro_statut from t_ropt"
-    ).fetchall()
-    con.executemany("insert into ref_routes values (?,?,?,?,?,?)", route_rows)
+def _hubsite_lookup_by_oid(con: sqlite3.Connection) -> dict[str, tuple[str, str]]:
+    return {
+        row[0]: (row[0], row[2] or row[0])
+        for row in con.execute("select site_id, migration_id, reference from ref_sites")
+        if row[0]
+    }
 
-    xl = _require_dependency(openpyxl, "openpyxl")
-    wb = xl.load_workbook(ROUTES_XLSX_PATH, read_only=True, data_only=True)
-    ws = wb["Parcours"]
-    rows = ws.iter_rows(values_only=True)
-    next(rows)
-    parcours = []
-    for row in rows:
-        parcours.append(
+
+def _site_name_by_id_map(con: sqlite3.Connection) -> dict[str, str]:
+    return {
+        row[0]: row[2] or row[0]
+        for row in con.execute("select site_id, migration_id, reference from ref_sites")
+        if row[0]
+    }
+
+
+def _optical_site_link_map(con: sqlite3.Connection) -> dict[tuple[str, str], tuple[str, str, str, int]]:
+    links: dict[tuple[str, str], tuple[str, str, str, int]] = {}
+    for row in con.execute(
+        "select object_type, object_migration_oid, site_id, site_name, rule_name, score from ref_optical_site_link"
+    ):
+        key = (row[0], row[1])
+        current = links.get(key)
+        if current is None or (row[5] or 0) > current[3]:
+            links[key] = (row[2], row[3], row[4], row[5] or 0)
+    return links
+
+
+def _site_match_from_values(
+    values: Iterable[object],
+    site_index: dict[str, list[tuple]],
+    all_sites: list[tuple],
+) -> SiteMatch:
+    best = SiteMatch(None, 0, None, None)
+    for value in values:
+        match = match_site(str(value or ""), site_index, all_sites)
+        if match.score > best.score:
+            best = match
+    return best
+
+
+def load_routes(con: sqlite3.Connection) -> None:
+    LOG.info("Loading GDB optical topology")
+    site_index, all_sites = build_site_index(con)
+    hubsite_lookup = _hubsite_lookup_by_oid(con)
+
+    parent_by_child: dict[str, tuple[str, str | None]] = {}
+    for item in iter_gdb_records("IMPORT_ISP_TEMPLATE"):
+        child_oid = str(item.get("ISPMIGOID") or "").strip()
+        if not child_oid:
+            continue
+        parent_by_child[child_oid] = (
+            str(item.get("PARENTTYPE") or "").strip(),
+            str(item.get("PARENTMIGOID") or "").strip() or None,
+        )
+
+    site_link_records: list[tuple] = []
+    for layer, (object_type, object_oid_field, hubsite_oid_field) in HOUSING_SITE_RELATION_LAYERS.items():
+        for item in iter_gdb_records(layer):
+            object_oid = str(item.get(object_oid_field) or "").strip()
+            hubsite_oid = str(item.get(hubsite_oid_field) or "").strip()
+            if not object_oid or not hubsite_oid or hubsite_oid not in hubsite_lookup:
+                continue
+            site_id, site_name = hubsite_lookup[hubsite_oid]
+            site_link_records.append(
+                (object_type, object_oid, site_id, site_name, "gdb_relation", 100, layer)
+            )
+
+    housing_records: list[tuple] = []
+    for layer in ("Rack", "OptPatchPanel", "Room", "Chamber", "Enclosure", "Pedestal", "ISPEnclosure", "ISPManifold"):
+        for item in iter_gdb_records(layer):
+            migration_oid = str(item.get("MIGRATION_OID") or "").strip()
+            if not migration_oid:
+                continue
+            reference = str(item.get("REFERENCE") or "")
+            userreference = str(item.get("USERREFERENCE") or "")
+            description = str(item.get("DESCRIPTION") or "")
+            comments = str(item.get("COMMENTS") or "")
+            location = str(item.get("LOCATION") or "")
+            site_match = _site_match_from_values(
+                (reference, userreference, description, comments, location),
+                site_index,
+                all_sites,
+            )
+            parent_type, parent_migration_oid = parent_by_child.get(migration_oid, (None, None))
+            housing_id = f"HSG-{layer.upper()}-{safe_hash([migration_oid, reference, userreference])}"
+            housing_records.append(
+                (
+                    housing_id,
+                    migration_oid,
+                    layer,
+                    reference,
+                    userreference,
+                    description,
+                    comments,
+                    location,
+                    parent_type,
+                    parent_migration_oid,
+                    site_match.site_id,
+                    site_match.site_name,
+                    site_match.rule,
+                    site_match.score,
+                )
+            )
+
+    connection_records: list[tuple] = []
+    for idx, item in enumerate(iter_gdb_records("CONNEXION_TEMPLATE"), start=1):
+        connection_records.append(
             (
-                str(row[1] or "").strip(),
-                str(row[0] or "").strip(),
-                int(row[4] or 0),
-                str(row[5] or ""),
-                str(row[6] or ""),
-                str(row[7] or ""),
-                str(row[8] or ""),
-                str(row[11] or ""),
-                str(row[14] or ""),
-                str(row[18] or ""),
-                str(row[16] or ""),
-                str(row[20] or ""),
-                str(row[21] or ""),
+                f"OCN-{idx:07d}-{safe_hash([item.get('HOUSINGMIGOID'), item.get('OBJ1_MIGOID'), item.get('OBJ2_MIGOID'), item.get('OBJ1_CONNECTOR1'), item.get('OBJ2_CONNECTOR1')])}",
+                str(item.get("HOUSING_TYPE") or ""),
+                str(item.get("HOUSINGMIGOID") or ""),
+                str(item.get("OBJ1_TYPE") or ""),
+                str(item.get("OBJ1_MIGOID") or ""),
+                item.get("OBJ1_CONNECTOR1"),
+                item.get("OBJ1_CONNECTOR2"),
+                str(item.get("OBJ2_TYPE") or ""),
+                str(item.get("OBJ2_MIGOID") or ""),
+                item.get("OBJ2_CONNECTOR1"),
+                item.get("OBJ2_CONNECTOR2"),
+                str(item.get("TYPE_BRANCHEMENT") or ""),
+                str(item.get("TRAY_MIGRATIONID") or ""),
+                item.get("ID_RATTACHEMENT"),
             )
         )
-    con.executemany("insert into ref_route_parcours values (?,?,?,?,?,?,?,?,?,?,?,?,?)", parcours)
+
+    cable_records: list[tuple] = []
+    cable_hint_records: list[tuple] = []
+    for item in iter_gdb_records("Fiber_Cable"):
+        migration_oid = str(item.get("MIGRATION_OID") or "").strip()
+        if not migration_oid:
+            continue
+        reference = str(item.get("REFERENCE") or "")
+        userreference = str(item.get("USERREFERENCE") or "")
+        comments = str(item.get("COMMENTS") or "")
+        labeltext = str(item.get("LABELTEXT") or "")
+        location = str(item.get("LOCATION") or "")
+        cable_id = f"CAB-{safe_hash([migration_oid, reference, userreference])}"
+        site_tokens = extract_place_tokens(reference, userreference, comments)
+        fiber_count = extract_fiber_count(reference, userreference, comments, labeltext)
+        cable_records.append(
+            (
+                cable_id,
+                migration_oid,
+                str(item.get("MIGRATION_ID") or ""),
+                reference,
+                userreference,
+                comments,
+                labeltext,
+                location,
+                fiber_count,
+                str(item.get("CABLETYPE") or ""),
+                str(item.get("RESEAU") or ""),
+                str(item.get("CODE_PROJET") or ""),
+                str(item.get("STATUS") or ""),
+                norm_text(reference or userreference or comments),
+                json.dumps(site_tokens, ensure_ascii=True),
+            )
+        )
+        for token in site_tokens:
+            base_score = 90 if fiber_count is not None and fiber_count <= 24 else 75
+            cable_hint_records.append((cable_id, token, base_score, "fiber_cable_name_token"))
+
+    con.executemany(
+        "insert into ref_optical_housing values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        housing_records,
+    )
+    con.executemany(
+        "insert into ref_optical_connection values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        connection_records,
+    )
+    con.executemany(
+        "insert into ref_optical_site_link values (?,?,?,?,?,?,?)",
+        site_link_records,
+    )
+    con.executemany(
+        "insert into ref_optical_cable values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        cable_records,
+    )
+    con.executemany(
+        "insert into ref_optical_cable_site_hint values (?,?,?,?)",
+        cable_hint_records,
+    )
     con.commit()
-    gpkg.close()
-    LOG.info("Loaded %s routes and %s parcours rows", len(route_rows), len(parcours))
+    LOG.info(
+        "Loaded %s housings, %s connections, %s cable records, %s direct site links",
+        len(housing_records),
+        len(connection_records),
+        len(cable_records),
+        len(site_link_records),
+    )
 
 
 def load_lease_tables(con: sqlite3.Connection) -> None:
     LOG.info("Loading GDB lease tables")
+    site_index, all_sites = build_site_index(con)
+    housing_site_links = _optical_site_link_map(con)
+    site_name_by_id = _site_name_by_id_map(con)
+
+    route_rows_by_ref: dict[str, tuple[str, str, str, str, str, str]] = {}
+    parcours_rows: list[tuple] = []
+    logical_route_records: list[tuple] = []
+    optical_lease_records: list[tuple] = []
+    optical_lease_endpoint_records: list[tuple] = []
+
+    def best_site_for_endpoint(
+        housing_type: object,
+        housing_migoid: object,
+        object_type: object,
+        object_migoid: object,
+        reference_label: object,
+    ) -> SiteMatch:
+        candidates = [
+            (str(object_type or ""), str(object_migoid or "").strip()),
+            (str(housing_type or ""), str(housing_migoid or "").strip()),
+        ]
+        for object_kind, migration_oid in candidates:
+            if migration_oid and (object_kind, migration_oid) in housing_site_links:
+                site_id, site_name, rule_name, score = housing_site_links[(object_kind, migration_oid)]
+                return SiteMatch(site_id, score, rule_name, site_name)
+        return _site_match_from_values((reference_label,), site_index, all_sites)
+
+    def add_logical_route(
+        route_ref: str | None,
+        *,
+        source_layer: str,
+        source_oid: object,
+        reference: object = None,
+        path_id: object = None,
+        pair_oid: object = None,
+        feature_type: object = None,
+        lessee: object = None,
+        client: object = None,
+        network: object = None,
+        status: object = None,
+        comments: object = None,
+    ) -> str | None:
+        route_ref_value = str(route_ref or "").strip().upper() or None
+        reference_value = str(reference or "").strip() or None
+        if not route_ref_value and not reference_value:
+            return None
+        logical_route_id = f"OROUTE-{safe_hash([source_layer, source_oid, route_ref_value or '', reference_value or '', path_id or '', pair_oid or ''])}"
+        logical_route_records.append(
+            (
+                logical_route_id,
+                route_ref_value,
+                source_layer,
+                str(source_oid or ""),
+                route_ref_value,
+                reference_value,
+                str(path_id or ""),
+                str(pair_oid or ""),
+                str(feature_type or ""),
+                str(lessee or ""),
+                str(client or ""),
+                str(network or ""),
+                str(status or ""),
+                str(comments or ""),
+                norm_text(route_ref_value or reference_value or comments),
+            )
+        )
+        if route_ref_value and route_ref_value not in route_rows_by_ref:
+            route_rows_by_ref[route_ref_value] = (
+                logical_route_id,
+                route_ref_value,
+                str(network or ""),
+                str(client or ""),
+                str(lessee or ""),
+                str(status or ""),
+            )
+        return logical_route_id
+
     lease_template_records = []
     for idx, item in enumerate(iter_gdb_records("LEASE_TEMPLATE"), start=1):
         lease_id = f"LEASET-{idx:06d}-{safe_hash([item.get('REF_EXPLOIT'), item.get('MIGOIDL1'), item.get('MIGOIDL2'), item.get('L1_CONN1'), item.get('L2_CONN1')])}"
+        route_ref = str(item.get("REF_EXPLOIT") or "").strip().upper()
         lease_template_records.append(
             (
                 lease_id,
-                str(item.get("REF_EXPLOIT") or "").strip().upper(),
+                route_ref,
                 str(item.get("RESEAU") or ""),
                 str(item.get("LESSEE") or ""),
                 str(item.get("CLIENTS") or ""),
@@ -1198,6 +1615,75 @@ def load_lease_tables(con: sqlite3.Connection) -> None:
                 str(item.get("COMMENTS") or ""),
             )
         )
+        optical_lease_records.append(
+            (
+                lease_id,
+                "template",
+                "LEASE_TEMPLATE",
+                lease_id,
+                route_ref,
+                None,
+                "",
+                "",
+                "",
+                str(item.get("LESSEE") or ""),
+                str(item.get("CLIENTS") or ""),
+                str(item.get("RESEAU") or ""),
+                "",
+                str(item.get("COMMENTS") or ""),
+                norm_text(route_ref or item.get("COMMENTS")),
+            )
+        )
+        logical_route_id = add_logical_route(
+            route_ref,
+            source_layer="LEASE_TEMPLATE",
+            source_oid=lease_id,
+            reference=None,
+            lessee=item.get("LESSEE"),
+            client=item.get("CLIENTS"),
+            network=item.get("RESEAU"),
+            comments=item.get("COMMENTS"),
+        )
+        for endpoint_label, housing_type, housing_migoid, object_type, object_migoid, conn1, conn2, reference_label, step_no, step_type in (
+            ("L1", item.get("HOUSINGTYPEL1"), item.get("HOUSINGMIGOIDL1"), item.get("TYPEL1"), item.get("MIGOIDL1"), item.get("L1_CONN1"), item.get("L1_CONN2"), item.get("REFERENCEL1"), 1, "origin"),
+            ("L2", item.get("HOUSINGTYPEL2"), item.get("HOUSINGMIGOIDL2"), item.get("TYPEL2"), item.get("MIGOIDL2"), item.get("L2_CONN1"), item.get("L2_CONN2"), item.get("REFERENCEL2"), 2, "destination"),
+        ):
+            site_match = best_site_for_endpoint(housing_type, housing_migoid, object_type, object_migoid, reference_label)
+            optical_lease_endpoint_records.append(
+                (
+                    lease_id,
+                    endpoint_label,
+                    str(housing_type or ""),
+                    str(housing_migoid or ""),
+                    str(object_type or ""),
+                    str(object_migoid or ""),
+                    conn1,
+                    conn2,
+                    str(reference_label or ""),
+                    site_match.site_id,
+                    site_match.site_name,
+                    site_match.rule,
+                    site_match.score,
+                )
+            )
+            if logical_route_id:
+                parcours_rows.append(
+                    (
+                        route_ref,
+                        logical_route_id,
+                        step_no,
+                        step_type,
+                        site_match.site_name or str(reference_label or ""),
+                        str(housing_type or ""),
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        str(reference_label or ""),
+                    )
+                )
     con.executemany("insert into ref_lease_template values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", lease_template_records)
 
     fiber_lease_records = []
@@ -1221,6 +1707,40 @@ def load_lease_tables(con: sqlite3.Connection) -> None:
                 str(item.get("COMMENTS") or ""),
                 str(item.get("MIGRATION_OID") or ""),
             )
+        )
+        route_ref = str(item.get("REF_EXPLOIT") or "").strip().upper() or infer_route_ref(item.get("REFERENCE"), item.get("COMMENTS"))
+        optical_lease_records.append(
+            (
+                lease_id,
+                "fiber_lease",
+                "Fiber_Lease",
+                str(item.get("MIGRATION_OID") or item.get("OID") or lease_id),
+                route_ref or "",
+                str(item.get("REFERENCE") or ""),
+                str(item.get("PATHID") or ""),
+                str(item.get("PAIROID") or ""),
+                str(item.get("FEATURE") or ""),
+                str(item.get("LESSEE") or ""),
+                str(item.get("CLIENT") or ""),
+                str(item.get("RESEAU") or ""),
+                str(item.get("STATUS") or ""),
+                str(item.get("COMMENTS") or ""),
+                norm_text(route_ref or item.get("REFERENCE") or item.get("COMMENTS")),
+            )
+        )
+        add_logical_route(
+            route_ref,
+            source_layer="Fiber_Lease",
+            source_oid=item.get("MIGRATION_OID") or item.get("OID") or lease_id,
+            reference=item.get("REFERENCE"),
+            path_id=item.get("PATHID"),
+            pair_oid=item.get("PAIROID"),
+            feature_type=item.get("FEATURE"),
+            lessee=item.get("LESSEE"),
+            client=item.get("CLIENT"),
+            network=item.get("RESEAU"),
+            status=item.get("STATUS"),
+            comments=item.get("COMMENTS"),
         )
     con.executemany("insert into ref_fiber_lease values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", fiber_lease_records)
 
@@ -1246,13 +1766,75 @@ def load_lease_tables(con: sqlite3.Connection) -> None:
                 item.get("ISPCONTAINERID"),
             )
         )
+        route_ref = str(item.get("REF_EXPLOIT") or "").strip().upper() or infer_route_ref(item.get("REFERENCE"), item.get("COMMENTS"))
+        optical_lease_records.append(
+            (
+                lease_id,
+                "isp_lease",
+                "ISPLease",
+                str(item.get("MIGRATION_OID") or item.get("OID") or lease_id),
+                route_ref or "",
+                str(item.get("REFERENCE") or ""),
+                str(item.get("PATHID") or ""),
+                str(item.get("PAIROID") or ""),
+                str(item.get("FEATURE") or ""),
+                str(item.get("LESSEE") or ""),
+                str(item.get("CLIENT") or ""),
+                str(item.get("RESEAU") or ""),
+                str(item.get("STATUS") or ""),
+                str(item.get("COMMENTS") or ""),
+                norm_text(route_ref or item.get("REFERENCE") or item.get("COMMENTS")),
+            )
+        )
+        add_logical_route(
+            route_ref,
+            source_layer="ISPLease",
+            source_oid=item.get("MIGRATION_OID") or item.get("OID") or lease_id,
+            reference=item.get("REFERENCE"),
+            path_id=item.get("PATHID"),
+            pair_oid=item.get("PAIROID"),
+            feature_type=item.get("FEATURE"),
+            lessee=item.get("LESSEE"),
+            client=item.get("CLIENT"),
+            network=item.get("RESEAU"),
+            status=item.get("STATUS"),
+            comments=item.get("COMMENTS"),
+        )
     con.executemany("insert into ref_isp_lease values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", isp_lease_records)
+    con.executemany(
+        "insert into ref_optical_lease values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        optical_lease_records,
+    )
+    con.executemany(
+        "insert into ref_optical_lease_endpoint values (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        optical_lease_endpoint_records,
+    )
+    logical_route_rows = []
+    seen_logical_route_ids: set[str] = set()
+    for row in logical_route_records:
+        if row[0] in seen_logical_route_ids:
+            continue
+        logical_route_rows.append(row)
+        seen_logical_route_ids.add(row[0])
+    con.executemany(
+        "insert into ref_optical_logical_route values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        logical_route_rows,
+    )
+    con.executemany(
+        "insert into ref_routes values (?,?,?,?,?,?)",
+        list(route_rows_by_ref.values()),
+    )
+    con.executemany(
+        "insert into ref_route_parcours values (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        parcours_rows,
+    )
     con.commit()
     LOG.info(
-        "Loaded %s lease_template, %s fiber_lease, %s isp_lease rows",
+        "Loaded %s lease_template, %s fiber_lease, %s isp_lease rows, %s logical routes",
         len(lease_template_records),
         len(fiber_lease_records),
         len(isp_lease_records),
+        len(logical_route_rows),
     )
 
 
@@ -1520,6 +2102,17 @@ def reconcile_services(con: sqlite3.Connection) -> None:
         for row in con.execute("select route_id, route_ref, network, client, lessee, status from ref_routes")
         if row[1]
     }
+    logical_route_by_ref = defaultdict(list)
+    for row in con.execute(
+        """
+        select logical_route_id, route_ref, source_layer, source_oid, reference, path_id,
+               pair_oid, feature_type, lessee, client, network, status, comments
+        from ref_optical_logical_route
+        """
+    ):
+        route_ref = (row[1] or "").strip().upper()
+        if route_ref:
+            logical_route_by_ref[route_ref].append(row)
 
     lease_rows = list(
         con.execute(
@@ -1532,8 +2125,35 @@ def reconcile_services(con: sqlite3.Connection) -> None:
         ref_exploit = (row[1] or "").strip().upper()
         if ref_exploit:
             lease_by_ref[ref_exploit].append(row)
-        site_l1 = match_site(row[5] or "", site_index, all_sites)
-        site_l2 = match_site(row[6] or "", site_index, all_sites)
+    lease_endpoint_rows = defaultdict(dict)
+    for row in con.execute(
+        """
+        select optical_lease_id, endpoint_label, site_id, site_name, site_score
+        from ref_optical_lease_endpoint
+        """
+    ):
+        lease_endpoint_rows[row[0]][row[1]] = row
+    for row in lease_rows:
+        lease_id = row[0]
+        endpoint_map = lease_endpoint_rows.get(lease_id, {})
+        site_l1_row = endpoint_map.get("L1")
+        site_l2_row = endpoint_map.get("L2")
+        if site_l1_row and site_l2_row and site_l1_row["site_id"] and site_l2_row["site_id"]:
+            site_l1 = SiteMatch(
+                site_l1_row["site_id"],
+                site_l1_row["site_score"] or 0,
+                "lease_endpoint_site",
+                site_l1_row["site_name"],
+            )
+            site_l2 = SiteMatch(
+                site_l2_row["site_id"],
+                site_l2_row["site_score"] or 0,
+                "lease_endpoint_site",
+                site_l2_row["site_name"],
+            )
+        else:
+            site_l1 = match_site(row[5] or "", site_index, all_sites)
+            site_l2 = match_site(row[6] or "", site_index, all_sites)
         if site_l1.site_id and site_l2.site_id:
             lease_pair_index[tuple(sorted([site_l1.site_id, site_l2.site_id]))].append((row, site_l1, site_l2))
 
@@ -1548,6 +2168,54 @@ def reconcile_services(con: sqlite3.Connection) -> None:
         "select lease_id, ref_exploit, client, lessee, reference, comments from ref_isp_lease where trim(ref_exploit) <> ''"
     ):
         isp_by_ref[(row[1] or "").strip().upper()].append(row)
+
+    optical_lease_rows = list(
+        con.execute(
+            """
+            select optical_lease_id, lease_kind, ref_exploit, reference, path_id, pair_oid,
+                   feature, lessee, client, network, status, comments
+            from ref_optical_lease
+            """
+        )
+    )
+    optical_lease_by_ref = defaultdict(list)
+    for row in optical_lease_rows:
+        for key in {(row[2] or "").strip().upper(), infer_route_ref(row[3], row[11]) or ""} - {""}:
+            optical_lease_by_ref[key].append(row)
+
+    optical_cable_rows = list(
+        con.execute(
+            """
+            select cable_id, migration_oid, reference, userreference, comments,
+                   number_of_fibers, normalized_reference, site_tokens_json
+            from ref_optical_cable
+            """
+        )
+    )
+    cable_by_route = defaultdict(list)
+    cable_by_site_token = defaultdict(list)
+    for row in optical_cable_rows:
+        for route_ref in extract_route_refs(row[2], row[3], row[4]):
+            cable_by_route[route_ref].append(row)
+        for token in json.loads(row[7] or "[]"):
+            cable_by_site_token[token].append(row)
+
+    optical_housing_rows = list(
+        con.execute(
+            """
+            select housing_id, housing_type, reference, userreference, description,
+                   comments, site_id, site_name
+            from ref_optical_housing
+            """
+        )
+    )
+    housing_by_site = defaultdict(list)
+    housing_by_route = defaultdict(list)
+    for row in optical_housing_rows:
+        if row[6]:
+            housing_by_site[row[6]].append(row)
+        for route_ref in extract_route_refs(row[2], row[3], row[4], row[5]):
+            housing_by_route[route_ref].append(row)
 
     swag_by_service = defaultdict(list)
     for row in con.execute(
@@ -1609,6 +2277,68 @@ def reconcile_services(con: sqlite3.Connection) -> None:
     evidence_records = []
     service_party_records = []
 
+    def append_optical_record(
+        service_id: str,
+        *,
+        route_ref: str | None = None,
+        route_id: str | None = None,
+        route_match_rule: str | None = None,
+        route_score: int | None = None,
+        lease_ref: str | None = None,
+        lease_id: str | None = None,
+        lease_match_rule: str | None = None,
+        lease_score: int | None = None,
+        fiber_lease_id: str | None = None,
+        fiber_lease_match_rule: str | None = None,
+        fiber_lease_score: int | None = None,
+        isp_lease_id: str | None = None,
+        isp_lease_match_rule: str | None = None,
+        isp_lease_score: int | None = None,
+        support_type: str | None = None,
+        support_ref: str | None = None,
+        logical_route_id: str | None = None,
+        cable_id: str | None = None,
+        cable_match_rule: str | None = None,
+        cable_score: int | None = None,
+        housing_id: str | None = None,
+        housing_match_rule: str | None = None,
+        housing_score: int | None = None,
+        site_a_optical_id: str | None = None,
+        site_z_optical_id: str | None = None,
+        optical_context: dict[str, object] | None = None,
+    ) -> None:
+        optical_records.append(
+            (
+                service_id,
+                route_ref,
+                route_id,
+                route_match_rule,
+                route_score,
+                lease_ref,
+                lease_id,
+                lease_match_rule,
+                lease_score,
+                fiber_lease_id,
+                fiber_lease_match_rule,
+                fiber_lease_score,
+                isp_lease_id,
+                isp_lease_match_rule,
+                isp_lease_score,
+                support_type,
+                support_ref,
+                logical_route_id,
+                cable_id,
+                cable_match_rule,
+                cable_score,
+                housing_id,
+                housing_match_rule,
+                housing_score,
+                site_a_optical_id,
+                site_z_optical_id,
+                json.dumps(optical_context or {}, ensure_ascii=True, sort_keys=True),
+            )
+        )
+
     services = list(
         con.execute(
             "select service_id, nature_service, principal_client, principal_external_ref, route_refs_json, service_refs_json, endpoint_a_raw, endpoint_z_raw, client_final from service_master_active"
@@ -1669,28 +2399,70 @@ def reconcile_services(con: sqlite3.Connection) -> None:
             )
 
         route_seen = set()
+        site_a_id = endpoint_matches["A"].site_id
+        site_z_id = endpoint_matches["Z"].site_id
         for route_ref in route_refs:
             if route_ref in route_seen:
                 continue
             route_seen.add(route_ref)
             route = route_index.get(route_ref)
-            route_id = route[0] if route else None
-            route_score = 100 if route else 0
-            optical_records.append((service_id, route_ref, route_id, "route_ref_exact", route_score, route_ref, None, None, None, None, None, None, None, None, None))
-            if route:
+            logical_route = logical_route_by_ref.get(route_ref, [None])[0]
+            logical_route_id = logical_route[0] if logical_route else (route[0] if route else None)
+            route_id = route[0] if route else logical_route_id
+            route_score = 100 if logical_route or route else 0
+            append_optical_record(
+                service_id,
+                route_ref=route_ref,
+                route_id=route_id,
+                route_match_rule="route_ref_exact",
+                route_score=route_score,
+                support_type="route",
+                support_ref=route_ref,
+                logical_route_id=logical_route_id,
+                site_a_optical_id=site_a_id,
+                site_z_optical_id=site_z_id,
+                optical_context={
+                    "source_layer": logical_route[2] if logical_route else "legacy_route_ref",
+                    "reference": logical_route[4] if logical_route else None,
+                    "path_id": logical_route[5] if logical_route else None,
+                    "pair_oid": logical_route[6] if logical_route else None,
+                },
+            )
+            if route or logical_route:
                 evidence_records.append(
                     build_evidence(
                         service_id,
                         "optical_route",
                         "route_ref_exact",
                         100,
-                        "ref_routes",
-                        route_id,
-                        {"route_ref": route_ref, "network": route[2], "client": route[3], "lessee": route[4]},
+                        "ref_optical_logical_route" if logical_route else "ref_routes",
+                        logical_route_id or route_id or route_ref,
+                        {
+                            "route_ref": route_ref,
+                            "network": (logical_route[10] if logical_route else route[2] if route else None),
+                            "client": (logical_route[9] if logical_route else route[3] if route else None),
+                            "lessee": (logical_route[8] if logical_route else route[4] if route else None),
+                        },
                     )
                 )
             for lease in lease_by_ref.get(route_ref, []):
-                optical_records.append((service_id, route_ref, route_id, "route_ref_exact", route_score, route_ref, lease[0], "lease_ref_exact", 95, None, None, None, None, None, None))
+                append_optical_record(
+                    service_id,
+                    route_ref=route_ref,
+                    route_id=route_id,
+                    route_match_rule="route_ref_exact",
+                    route_score=route_score,
+                    lease_ref=route_ref,
+                    lease_id=lease[0],
+                    lease_match_rule="lease_ref_exact",
+                    lease_score=95,
+                    support_type="lease",
+                    support_ref=lease[0],
+                    logical_route_id=logical_route_id,
+                    site_a_optical_id=site_a_id,
+                    site_z_optical_id=site_z_id,
+                    optical_context={"reference_l1": lease[5], "reference_l2": lease[6]},
+                )
                 evidence_records.append(
                     build_evidence(
                         service_id,
@@ -1703,7 +2475,23 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                     )
                 )
             for fiber in fiber_by_ref.get(route_ref, []):
-                optical_records.append((service_id, route_ref, route_id, "route_ref_exact", route_score, route_ref, None, None, None, fiber[0], "fiber_lease_ref_exact", 95, None, None, None))
+                append_optical_record(
+                    service_id,
+                    route_ref=route_ref,
+                    route_id=route_id,
+                    route_match_rule="route_ref_exact",
+                    route_score=route_score,
+                    lease_ref=route_ref,
+                    fiber_lease_id=fiber[0],
+                    fiber_lease_match_rule="fiber_lease_ref_exact",
+                    fiber_lease_score=95,
+                    support_type="fiber_lease",
+                    support_ref=fiber[0],
+                    logical_route_id=logical_route_id,
+                    site_a_optical_id=site_a_id,
+                    site_z_optical_id=site_z_id,
+                    optical_context={"reference": fiber[4], "comments": fiber[5]},
+                )
                 evidence_records.append(
                     build_evidence(
                         service_id,
@@ -1716,7 +2504,23 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                     )
                 )
             for isp in isp_by_ref.get(route_ref, []):
-                optical_records.append((service_id, route_ref, route_id, "route_ref_exact", route_score, route_ref, None, None, None, None, None, None, isp[0], "isp_lease_ref_exact", 95))
+                append_optical_record(
+                    service_id,
+                    route_ref=route_ref,
+                    route_id=route_id,
+                    route_match_rule="route_ref_exact",
+                    route_score=route_score,
+                    lease_ref=route_ref,
+                    isp_lease_id=isp[0],
+                    isp_lease_match_rule="isp_lease_ref_exact",
+                    isp_lease_score=95,
+                    support_type="isp_lease",
+                    support_ref=isp[0],
+                    logical_route_id=logical_route_id,
+                    site_a_optical_id=site_a_id,
+                    site_z_optical_id=site_z_id,
+                    optical_context={"reference": isp[4], "comments": isp[5]},
+                )
                 evidence_records.append(
                     build_evidence(
                         service_id,
@@ -1764,16 +2568,93 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                         {"route_ref": route_ref, "hostname": config[2], "header_info": config[3], "vlans": json.loads(config[6] or "[]")},
                     )
                 )
+            for cable in cable_by_route.get(route_ref, []):
+                cable_score = 95 if cable[5] is not None and int(cable[5]) <= 24 else 88
+                append_optical_record(
+                    service_id,
+                    route_ref=route_ref,
+                    route_id=route_id,
+                    route_match_rule="route_ref_exact",
+                    route_score=route_score,
+                    support_type="cable",
+                    support_ref=cable[0],
+                    logical_route_id=logical_route_id,
+                    cable_id=cable[0],
+                    cable_match_rule="cable_route_ref_exact",
+                    cable_score=cable_score,
+                    site_a_optical_id=site_a_id,
+                    site_z_optical_id=site_z_id,
+                    optical_context={
+                        "reference": cable[2],
+                        "userreference": cable[3],
+                        "number_of_fibers": cable[5],
+                        "site_tokens": json.loads(cable[7] or "[]"),
+                    },
+                )
+                evidence_records.append(
+                    build_evidence(
+                        service_id,
+                        "optical_cable",
+                        "cable_route_ref_exact",
+                        cable_score,
+                        "ref_optical_cable",
+                        cable[0],
+                        {"route_ref": route_ref, "reference": cable[2], "number_of_fibers": cable[5]},
+                    )
+                )
+            for housing in housing_by_route.get(route_ref, []):
+                append_optical_record(
+                    service_id,
+                    route_ref=route_ref,
+                    route_id=route_id,
+                    route_match_rule="route_ref_exact",
+                    route_score=route_score,
+                    support_type="housing",
+                    support_ref=housing[0],
+                    logical_route_id=logical_route_id,
+                    housing_id=housing[0],
+                    housing_match_rule="housing_route_ref_exact",
+                    housing_score=82,
+                    site_a_optical_id=site_a_id,
+                    site_z_optical_id=site_z_id,
+                    optical_context={"reference": housing[2], "description": housing[4]},
+                )
+                evidence_records.append(
+                    build_evidence(
+                        service_id,
+                        "optical_housing",
+                        "housing_route_ref_exact",
+                        82,
+                        "ref_optical_housing",
+                        housing[0],
+                        {"route_ref": route_ref, "reference": housing[2], "site_id": housing[6]},
+                    )
+                )
 
         if nature_service in {"IRU FON", "Location FON"} and not route_refs:
-            site_a = endpoint_matches["A"].site_id
-            site_z = endpoint_matches["Z"].site_id
-            if site_a and site_z:
-                for lease, site_l1, site_l2 in lease_pair_index.get(tuple(sorted([site_a, site_z])), []):
+            if site_a_id and site_z_id:
+                for lease, site_l1, site_l2 in lease_pair_index.get(tuple(sorted([site_a_id, site_z_id])), []):
                     route_ref = (lease[1] or "").strip().upper()
                     route = route_index.get(route_ref)
-                    route_id = route[0] if route else None
-                    optical_records.append((service_id, route_ref, route_id, "lease_site_pair_match", 80, route_ref, lease[0], "lease_site_pair_match", 85, None, None, None, None, None, None))
+                    logical_route = logical_route_by_ref.get(route_ref, [None])[0]
+                    route_id = route[0] if route else (logical_route[0] if logical_route else None)
+                    append_optical_record(
+                        service_id,
+                        route_ref=route_ref,
+                        route_id=route_id,
+                        route_match_rule="lease_site_pair_match",
+                        route_score=80,
+                        lease_ref=route_ref,
+                        lease_id=lease[0],
+                        lease_match_rule="lease_site_pair_match",
+                        lease_score=85,
+                        support_type="lease",
+                        support_ref=lease[0],
+                        logical_route_id=logical_route[0] if logical_route else route_id,
+                        site_a_optical_id=site_a_id,
+                        site_z_optical_id=site_z_id,
+                        optical_context={"reference_l1": lease[5], "reference_l2": lease[6]},
+                    )
                     evidence_records.append(
                         build_evidence(
                             service_id,
@@ -1782,8 +2663,75 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                             85,
                             "ref_lease_template",
                             lease[0],
-                            {"reference_l1": lease[5], "reference_l2": lease[6], "site_a": site_a, "site_z": site_z},
+                            {"reference_l1": lease[5], "reference_l2": lease[6], "site_a": site_a_id, "site_z": site_z_id},
                         )
+                    )
+
+        if nature_service in {"IRU FON", "Location FON"}:
+            site_tokens = set(extract_place_tokens(endpoint_a_raw, endpoint_z_raw, client_final, principal_external_ref))
+            candidate_cables: dict[str, tuple] = {}
+            for token in site_tokens:
+                for cable in cable_by_site_token.get(token, []):
+                    candidate_cables.setdefault(cable[0], cable)
+            for cable in candidate_cables.values():
+                cable_tokens = set(json.loads(cable[7] or "[]"))
+                overlap = len(site_tokens & cable_tokens)
+                if overlap < 1:
+                    continue
+                cable_score = 92 if overlap >= 2 else 80
+                if cable[5] is not None and int(cable[5]) <= 24:
+                    cable_score = min(96, cable_score + 4)
+                append_optical_record(
+                    service_id,
+                    support_type="cable",
+                    support_ref=cable[0],
+                    cable_id=cable[0],
+                    cable_match_rule="cable_site_token_overlap",
+                    cable_score=cable_score,
+                    site_a_optical_id=site_a_id,
+                    site_z_optical_id=site_z_id,
+                    optical_context={
+                        "reference": cable[2],
+                        "number_of_fibers": cable[5],
+                        "site_tokens": sorted(cable_tokens),
+                    },
+                )
+                evidence_records.append(
+                    build_evidence(
+                        service_id,
+                        "optical_cable",
+                        "cable_site_token_overlap",
+                        cable_score,
+                        "ref_optical_cable",
+                        cable[0],
+                        {"reference": cable[2], "site_tokens": sorted(cable_tokens)},
+                    )
+                )
+            if site_a_id:
+                for housing in housing_by_site.get(site_a_id, []):
+                    append_optical_record(
+                        service_id,
+                        support_type="housing",
+                        support_ref=housing[0],
+                        housing_id=housing[0],
+                        housing_match_rule="housing_site_match",
+                        housing_score=78,
+                        site_a_optical_id=site_a_id,
+                        site_z_optical_id=site_z_id,
+                        optical_context={"reference": housing[2], "description": housing[4], "site_id": housing[6]},
+                    )
+            if site_z_id and site_z_id != site_a_id:
+                for housing in housing_by_site.get(site_z_id, []):
+                    append_optical_record(
+                        service_id,
+                        support_type="housing",
+                        support_ref=housing[0],
+                        housing_id=housing[0],
+                        housing_match_rule="housing_site_match",
+                        housing_score=78,
+                        site_a_optical_id=site_a_id,
+                        site_z_optical_id=site_z_id,
+                        optical_context={"reference": housing[2], "description": housing[4], "site_id": housing[6]},
                     )
 
         exact_network_hit = False
@@ -1953,7 +2901,21 @@ def reconcile_services(con: sqlite3.Connection) -> None:
 
     con.executemany("insert into service_endpoint values (?,?,?,?,?,?,?)", endpoint_records)
     con.executemany("insert into service_party values (?,?,?,?,?,?,?)", service_party_records)
-    con.executemany("insert into service_support_optique values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", optical_records)
+    con.executemany(
+        """
+        insert into service_support_optique (
+            service_id, route_ref, route_id, route_match_rule, route_score,
+            lease_ref, lease_id, lease_match_rule, lease_score,
+            fiber_lease_id, fiber_lease_match_rule, fiber_lease_score,
+            isp_lease_id, isp_lease_match_rule, isp_lease_score,
+            support_type, support_ref, logical_route_id,
+            cable_id, cable_match_rule, cable_score,
+            housing_id, housing_match_rule, housing_score,
+            site_a_optical_id, site_z_optical_id, optical_context_json
+        ) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        optical_records,
+    )
     con.executemany("insert into service_support_reseau values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", network_records)
     con.executemany("insert into service_match_evidence values (?,?,?,?,?,?,?,?)", evidence_records)
     con.commit()
@@ -2058,10 +3020,21 @@ def build_publication_views(con: sqlite3.Connection) -> None:
         final_party_row = best_scored_row(party_rows.get((service_id, "final_party"), []), [4])
         endpoint_a_row = best_scored_row(endpoint_rows.get((service_id, "A"), []), [5])
         endpoint_z_row = best_scored_row(endpoint_rows.get((service_id, "Z"), []), [5])
-        optical_row = best_scored_row(optical_rows.get(service_id, []), [4, 8, 11, 14])
+        optical_candidates = optical_rows.get(service_id, [])
+        optical_row = None
+        best_optical_score = 0
+        for candidate in optical_candidates:
+            candidate_scores = [candidate[index] or 0 for index in (4, 8, 11, 14)]
+            if len(candidate) > 20:
+                candidate_scores.append(candidate[20] or 0)
+            if len(candidate) > 23:
+                candidate_scores.append(candidate[23] or 0)
+            score = max(candidate_scores) if candidate_scores else 0
+            if optical_row is None or score > best_optical_score:
+                optical_row = candidate
+                best_optical_score = score
         network_row = best_scored_row(network_rows.get(service_id, []), [4, 7, 10, 13, 16])
 
-        best_optical_score = max((optical_row[index] or 0) for index in [4, 8, 11, 14]) if optical_row else 0
         best_network_score = max((network_row[index] or 0) for index in [4, 7, 10, 13, 16]) if network_row else 0
         endpoint_a_score = endpoint_a_row[5] if endpoint_a_row else 0
         endpoint_z_score = endpoint_z_row[5] if endpoint_z_row else 0
@@ -2088,6 +3061,13 @@ def build_publication_views(con: sqlite3.Connection) -> None:
             confidence_band = "medium"
         else:
             confidence_band = "low"
+
+        optical_context = {}
+        if optical_row and len(optical_row) > 26 and optical_row[26]:
+            try:
+                optical_context = json.loads(optical_row[26])
+            except json.JSONDecodeError:
+                optical_context = {}
 
         gold_rows.append(
             (
@@ -2124,6 +3104,12 @@ def build_publication_views(con: sqlite3.Connection) -> None:
                         "best_network_score": best_network_score,
                         "endpoint_a_score": endpoint_a_score,
                         "endpoint_z_score": endpoint_z_score,
+                        "logical_route_id": optical_row[17] if optical_row and len(optical_row) > 17 else None,
+                        "cable_id": optical_row[18] if optical_row and len(optical_row) > 18 else None,
+                        "housing_id": optical_row[21] if optical_row and len(optical_row) > 21 else None,
+                        "optical_site_a": optical_row[24] if optical_row and len(optical_row) > 24 else None,
+                        "optical_site_z": optical_row[25] if optical_row and len(optical_row) > 25 else None,
+                        "optical_reasoning": optical_context,
                     },
                     ensure_ascii=True,
                     sort_keys=True,
@@ -2339,6 +3325,9 @@ def _resolve_agent_optical(
             row["lease_id"],
             row["fiber_lease_id"],
             row["isp_lease_id"],
+            _get_row_value(row, "cable_id"),
+            _get_row_value(row, "housing_id"),
+            _get_row_value(row, "support_ref"),
         }:
             return {
                 "route_ref": row["route_ref"],
@@ -2346,10 +3335,26 @@ def _resolve_agent_optical(
                 "lease_id": row["lease_id"],
                 "fiber_lease_id": row["fiber_lease_id"],
                 "isp_lease_id": row["isp_lease_id"],
+                "logical_route_id": _get_row_value(row, "logical_route_id"),
+                "cable_id": _get_row_value(row, "cable_id"),
+                "housing_id": _get_row_value(row, "housing_id"),
+                "optical_site_a_id": _get_row_value(row, "site_a_optical_id"),
+                "optical_site_z_id": _get_row_value(row, "site_z_optical_id"),
+                "optical_context_json": _get_row_value(row, "optical_context_json"),
             }, True
 
-    if _table_exists(con := optical_rows[service_id][0].connection if optical_rows.get(service_id) else None, ""):
-        pass
+    return None, False
+
+
+def _parse_summary_json(row: sqlite3.Row | None) -> dict[str, object]:
+    if row is None or "summary_json" not in row.keys() or not row["summary_json"]:
+        return {}
+    try:
+        return json.loads(row["summary_json"])
+    except json.JSONDecodeError:
+        return {}
+
+
 def _critical_gap_flags(nature_service: str, gap_flags: list[str]) -> list[str]:
     critical = {
         "missing_bss_link",
@@ -2394,6 +3399,7 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
         for service in services:
             service_id = service["service_id"]
             gold = gold_rows.get(service_id)
+            gold_summary = _parse_summary_json(gold)
             latest_res = latest_agent.get(service_id)
             validated_res = validated_agent.get(service_id)
             bss_link = bss_links.get(service_id)
@@ -2478,6 +3484,12 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
             lease_id = gold["lease_id"] if gold is not None else None
             fiber_lease_id = gold["fiber_lease_id"] if gold is not None else None
             isp_lease_id = gold["isp_lease_id"] if gold is not None else None
+            logical_route_id = gold_summary.get("logical_route_id")
+            cable_id = gold_summary.get("cable_id")
+            housing_id = gold_summary.get("housing_id")
+            optical_site_a_id = gold_summary.get("optical_site_a")
+            optical_site_z_id = gold_summary.get("optical_site_z")
+            optical_context = gold_summary.get("optical_reasoning") or {}
             optical_source = "gold" if any((route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id)) else "missing"
             agent_optical_support_hint = None
             if validated_res is not None and any(
@@ -2487,6 +3499,8 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
                     ("lease_id" in validated_res.keys() and (validated_res["lease_id"] or "").strip()),
                     ("fiber_lease_id" in validated_res.keys() and (validated_res["fiber_lease_id"] or "").strip()),
                     ("isp_lease_id" in validated_res.keys() and (validated_res["isp_lease_id"] or "").strip()),
+                    ("cable_id" in validated_res.keys() and (validated_res["cable_id"] or "").strip()),
+                    ("housing_id" in validated_res.keys() and (validated_res["housing_id"] or "").strip()),
                 )
             ):
                 route_ref = validated_res["route_ref"] if "route_ref" in validated_res.keys() else route_ref
@@ -2494,6 +3508,9 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
                 lease_id = validated_res["lease_id"] if "lease_id" in validated_res.keys() else lease_id
                 fiber_lease_id = validated_res["fiber_lease_id"] if "fiber_lease_id" in validated_res.keys() else fiber_lease_id
                 isp_lease_id = validated_res["isp_lease_id"] if "isp_lease_id" in validated_res.keys() else isp_lease_id
+                logical_route_id = validated_res["route_id"] if "route_id" in validated_res.keys() and validated_res["route_id"] else logical_route_id
+                cable_id = validated_res["cable_id"] if "cable_id" in validated_res.keys() else cable_id
+                housing_id = validated_res["housing_id"] if "housing_id" in validated_res.keys() else housing_id
                 optical_source = "agent_validated"
                 note_parts.append("optical from agent")
             elif validated_res is not None and (validated_res["optical_support_ref"] or "").strip():
@@ -2517,13 +3534,25 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
                     lease_id = remapped["lease_id"]
                     fiber_lease_id = remapped["fiber_lease_id"]
                     isp_lease_id = remapped["isp_lease_id"]
+                    logical_route_id = _get_row_value(remapped, "logical_route_id")
+                    cable_id = _get_row_value(remapped, "cable_id")
+                    housing_id = _get_row_value(remapped, "housing_id")
+                    optical_site_a_id = _get_row_value(remapped, "site_a_optical_id")
+                    optical_site_z_id = _get_row_value(remapped, "site_z_optical_id")
+                    if _get_row_value(remapped, "optical_context_json"):
+                        try:
+                            optical_context = json.loads(_get_row_value(remapped, "optical_context_json") or "{}")
+                        except json.JSONDecodeError:
+                            optical_context = {}
                     optical_source = "agent_validated"
                     note_parts.append("optical from agent")
-                elif not any((route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id)):
+                elif not any((route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id, cable_id, housing_id)):
                     optical_source = "agent_hint_unmapped"
                     gap_flags.append("agent_hint_unmapped")
-            if not any((route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id)):
+            if not any((route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id, cable_id, housing_id)):
                 gap_flags.append("missing_optical_support")
+            if not any((route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id)):
+                gap_flags.append("missing_logical_route_ref")
 
             interface_id = gold["interface_id"] if gold is not None else None
             network_interface_id = gold["network_interface_id"] if gold is not None else None
@@ -2626,6 +3655,12 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
                     lease_id,
                     fiber_lease_id,
                     isp_lease_id,
+                    logical_route_id,
+                    cable_id,
+                    housing_id,
+                    optical_site_a_id,
+                    optical_site_z_id,
+                    json.dumps(optical_context, ensure_ascii=True, sort_keys=True),
                     optical_source,
                     agent_optical_support_hint,
                     interface_id,
@@ -2648,7 +3683,7 @@ def build_facturable_publication(con: sqlite3.Connection) -> None:
                 )
             )
 
-        placeholders = ", ".join("?" for _ in range(49))
+        placeholders = ", ".join("?" for _ in range(55))
         con.executemany(
             f"insert into service_facturable_final values ({placeholders})",
             rows_to_insert,
@@ -2680,6 +3715,12 @@ def build_report(con: sqlite3.Connection) -> None:
     ).fetchone()[0]
     lease_matched = con.execute(
         "select count(distinct service_id) from service_support_optique where lease_id is not null or fiber_lease_id is not null or isp_lease_id is not null"
+    ).fetchone()[0]
+    cable_matched = con.execute(
+        "select count(distinct service_id) from service_support_optique where cable_id is not null"
+    ).fetchone()[0]
+    housing_matched = con.execute(
+        "select count(distinct service_id) from service_support_optique where housing_id is not null"
     ).fetchone()[0]
     network_matched = con.execute(
         "select count(distinct service_id) from service_support_reseau where interface_id is not null or network_interface_id is not null or network_vlan_id is not null or cpe_id is not null or config_id is not null"
@@ -2739,7 +3780,7 @@ def build_report(con: sqlite3.Connection) -> None:
         con.execute(
             """
             select count(*) from service_facturable_final
-            where coalesce(route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id) is not null
+            where coalesce(route_ref, route_id, lease_id, fiber_lease_id, isp_lease_id, cable_id, housing_id) is not null
             """
         ).fetchone()[0]
         if final_rows
@@ -2764,6 +3805,8 @@ def build_report(con: sqlite3.Connection) -> None:
         f"- Services with matched site: {site_matched}",
         f"- Services with matched route: {route_matched}",
         f"- Services with matched optical lease: {lease_matched}",
+        f"- Services with matched optical cable: {cable_matched}",
+        f"- Services with matched optical housing: {housing_matched}",
         f"- Services with network support evidence: {network_matched}",
         f"- Services with at least one strong evidence (score >= 95): {auto_candidates}",
         f"- Services auto-validated in Gold: {auto_valid}",
@@ -2791,7 +3834,7 @@ def build_report(con: sqlite3.Connection) -> None:
             f"- Rows with optical support: {final_with_optical}",
             "",
             "## Notes",
-            "- Route and lease matching use exact technical refs first (`TOIP`, `00FT`, `FREE`, `OPE/L2L`).",
+            "- Optical matching is built directly from the GDB: logical refs (`TOIP`, `00FT`, `FREE`) plus physical cables and housings.",
             "- Site matching uses exact aliases, addresses and token overlap on Hubsite names.",
             "- Network support uses exact SWAG/config refs first, then parsed RANCID VLAN/interface labels and CPE hints.",
             "- Gold and review queue are materialized in SQLite for immediate exploitation.",

@@ -105,8 +105,6 @@ Role:
 ### 4.2 Sources OSS optiques
 
 - `GDB_TeloiseV3 (1).zip`
-- `hello_gracethd.gpkg`
-- `routes_optiques_pur_gdb_TELOISE (2).xlsx`
 
 Role:
 
@@ -211,6 +209,14 @@ Referentiels normalises:
 - `party_master`
 - `party_alias`
 - `ref_sites`
+- `ref_optical_logical_route`
+- `ref_optical_lease`
+- `ref_optical_lease_endpoint`
+- `ref_optical_cable`
+- `ref_optical_housing`
+- `ref_optical_connection`
+- `ref_optical_site_link`
+- `ref_optical_cable_site_hint`
 - `ref_routes`
 - `ref_route_parcours`
 - `ref_lease_template`
@@ -248,7 +254,7 @@ Autour de ce pivot:
 - le monde BSS est rattache par `service_bss_line`,
 - le monde client par `service_party`,
 - le monde site par `service_endpoint`,
-- le monde optique par `service_support_optique`,
+- le monde optique par `service_support_optique`, alimente depuis la GDB logique et physique,
 - le monde reseau par `service_support_reseau`,
 - la traçabilite par `service_match_evidence`,
 - la gouvernance par `service_review_queue` et les tables `override_*`.

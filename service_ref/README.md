@@ -9,8 +9,6 @@ Inputs expected at the workspace root:
 - `6-3_20260203_Suivi_Contrats_LEA.xlsx`
 - `Notice de lecture base LEA (1).docx`
 - `GDB_TeloiseV3 (1).zip`
-- `hello_gracethd.gpkg`
-- `routes_optiques_pur_gdb_TELOISE (2).xlsx`
 - `unzipped_equip/Export inventaire SWAG.xlsx`
 - `unzipped_equip/Inventaire CPE Teloise Janv26.xlsx`
 - `unzipped_equip/*.txt`
@@ -63,6 +61,7 @@ The pipeline is intentionally deterministic and explainable:
 - active LEA scope only (`CMD - Statut Commande = 40`)
 - service taxonomy based on the agreed business mapping
 - exact matching first (`TOIP`, `OPE/L2L`, site ids)
+- optical modeling built directly from the GDB (`LEASE_TEMPLATE`, `ISPLease`, `Fiber_Cable`, `Rack`, `OptPatchPanel`, `CONNEXION_TEMPLATE`, `IMPORT_ISP_TEMPLATE`)
 - parsed network evidence from SWAG, CPE configs and RANCID files
 - scored fallback matching for sites, VLAN labels, interface labels and CPEs
 - all enrichments stored as evidence with a rule name and score
@@ -72,6 +71,14 @@ Publication outputs now distinguish:
 - `gold_service_active`: technical Gold used by the reconciliation engine
 - `service_facturable_final`: published billing referential using priority
   `agent_validated > gold > review`
+
+Optical modeling is now GDB-first:
+
+- `ref_optical_logical_route`: logical optical refs (`TOIP`, `00FT`, `FREE`, etc.)
+- `ref_optical_lease`, `ref_optical_lease_endpoint`: logical lease objects and endpoints
+- `ref_optical_cable`, `ref_optical_housing`, `ref_optical_connection`: physical optical context
+- `ref_optical_site_link`, `ref_optical_cable_site_hint`: site/topology hints extracted from the GDB
+- `ref_routes`, `ref_route_parcours`: compatibility tables derived from the GDB, no longer from GPKG/XLSX
 
 The final billing referential keeps every active service visible, including
 incomplete ones, but materializes explicit publication statuses and gap flags.

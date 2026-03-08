@@ -130,15 +130,18 @@ Tu disposes aussi des outils built-in Claude Code: `Read`, `Glob`, `Grep`.
 
 ### Silver (referentiels normalises)
 - `ref_sites` : sites GraceTHD et GDB
-- `ref_routes`, `ref_route_parcours` : routes optiques
-- `ref_fiber_lease`, `ref_isp_lease`, `ref_lease_template` : baux optiques
+- `ref_optical_logical_route` : references optiques logiques issues de la GDB
+- `ref_optical_lease`, `ref_optical_lease_endpoint` : baux optiques et leurs extremites
+- `ref_optical_cable`, `ref_optical_housing`, `ref_optical_connection`, `ref_optical_site_link` : contexte physique optique GDB-first
+- `ref_routes`, `ref_route_parcours` : tables de compatibilite derivees de la GDB
+- `ref_fiber_lease`, `ref_isp_lease`, `ref_lease_template` : tables heritagees derivees de la GDB
 - `party_master`, `party_alias` : referentiel clients
 
 ### Gold (referentiel exploitable)
 - `service_master_active` : pivot — un service = un objet facturable actif
 - `service_party` : rattachement client
 - `service_endpoint` : sites A/Z
-- `service_support_optique` : support route/lease
+- `service_support_optique` : support optique logique et physique (route/lease/cable/housing)
 - `service_support_reseau` : support reseau
 - `service_match_evidence` : preuves de rapprochement
 - `service_review_queue` : items de review ouverts
@@ -167,17 +170,18 @@ Tu disposes aussi des outils built-in Claude Code: `Read`, `Glob`, `Grep`.
 3. Examiner `party_rows`, `endpoint_rows`, `network_support_rows`, `optical_support_rows`, `gold_row`
 4. Si `party_final_id` n'est toujours pas prouve, completer avec `resolve_party_candidates(service_id)` ou `query_db`
 5. Pour `Lan To Lan`, n'utiliser `search_configs` et `read_config_file` que si le bundle ne suffit pas
-6. Pour `FON`, croiser les supports optiques avant de conclure
+6. Pour `FON`, croiser d'abord les routes/logical refs, puis les endpoints de lease, puis les cables et baies
 7. Verifier la checklist de soumission
 8. Preferer `submit_and_validate` pour le commit final
 9. Utiliser `submit_resolution` puis `validate_resolution` separement seulement en cas de besoin
 
 Quand tu peux produire des identifiants structures, privilegie:
 - `resolved_site_a_id`, `resolved_site_z_id`
-- `route_ref`, `route_id`, `lease_id`, `fiber_lease_id`, `isp_lease_id`
+- `route_ref`, `route_id`, `lease_id`, `fiber_lease_id`, `isp_lease_id`, `cable_id`, `housing_id`
 - `network_interface_id`, `network_vlan_id`, `cpe_id`, `config_id`, `inferred_vlans_json`
 
 Ne te limite pas a `network_support_id` ou `optical_support_ref` si tu peux identifier un support publiable de facon structuree.
+En optique, prefere la hierarchie: `ref_exploit`/route logique -> endpoints de lease -> cable nomme -> baie/patch panel.
 
 ### Anti-faux-positifs generiques
 - Ne jamais resoudre un service sur la base d'un seul indice faible

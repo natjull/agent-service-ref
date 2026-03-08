@@ -275,6 +275,9 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
             "lease_ref", "lease_id", "lease_match_rule", "lease_score",
             "fiber_lease_id", "fiber_lease_match_rule", "fiber_lease_score",
             "isp_lease_id", "isp_lease_match_rule", "isp_lease_score", "support_type", "support_ref",
+            "logical_route_id", "cable_id", "cable_match_rule", "cable_score",
+            "housing_id", "housing_match_rule", "housing_score",
+            "site_a_optical_id", "site_z_optical_id", "optical_context_json",
         )
         if col in optical_cols
     ]
@@ -295,10 +298,93 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
         if optical_select
         else []
     )
+    logical_routes = (
+        con.execute(
+            """
+            SELECT logical_route_id, route_ref, source_layer, reference, path_id, pair_oid,
+                   feature_type, lessee, client, network, status
+            FROM ref_optical_logical_route
+            WHERE route_ref IN (
+                SELECT route_ref FROM service_support_optique WHERE service_id = ? AND route_ref IS NOT NULL
+            )
+            ORDER BY route_ref, source_layer
+            LIMIT 10
+            """,
+            (service_id,),
+        ).fetchall()
+        if _row_to_dict(
+            con.execute("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_logical_route'").fetchone()
+        )
+        else []
+    )
+    lease_endpoints = (
+        con.execute(
+            """
+            SELECT ole.optical_lease_id, ole.lease_kind, ole.ref_exploit, ole.reference,
+                   ep.endpoint_label, ep.reference_label, ep.site_id, ep.site_name, ep.site_score
+            FROM ref_optical_lease ole
+            JOIN ref_optical_lease_endpoint ep ON ep.optical_lease_id = ole.optical_lease_id
+            WHERE ole.optical_lease_id IN (
+                SELECT lease_id FROM service_support_optique WHERE service_id = ? AND lease_id IS NOT NULL
+                UNION
+                SELECT fiber_lease_id FROM service_support_optique WHERE service_id = ? AND fiber_lease_id IS NOT NULL
+                UNION
+                SELECT isp_lease_id FROM service_support_optique WHERE service_id = ? AND isp_lease_id IS NOT NULL
+            )
+            ORDER BY ole.optical_lease_id, ep.endpoint_label
+            LIMIT 20
+            """,
+            (service_id, service_id, service_id),
+        ).fetchall()
+        if _row_to_dict(
+            con.execute("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_lease_endpoint'").fetchone()
+        )
+        else []
+    )
+    cable_candidates = (
+        con.execute(
+            """
+            SELECT DISTINCT c.cable_id, c.reference, c.userreference, c.number_of_fibers,
+                   c.site_tokens_json
+            FROM ref_optical_cable c
+            JOIN service_support_optique s ON s.cable_id = c.cable_id
+            WHERE s.service_id = ?
+            ORDER BY c.number_of_fibers ASC, c.reference
+            LIMIT 10
+            """,
+            (service_id,),
+        ).fetchall()
+        if _row_to_dict(
+            con.execute("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_cable'").fetchone()
+        )
+        else []
+    )
+    housing_candidates = (
+        con.execute(
+            """
+            SELECT DISTINCT h.housing_id, h.housing_type, h.reference, h.description,
+                   h.site_id, h.site_name
+            FROM ref_optical_housing h
+            JOIN service_support_optique s ON s.housing_id = h.housing_id
+            WHERE s.service_id = ?
+            ORDER BY h.housing_type, h.reference
+            LIMIT 10
+            """,
+            (service_id,),
+        ).fetchall()
+        if _row_to_dict(
+            con.execute("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_housing'").fetchone()
+        )
+        else []
+    )
     return {
         "service_id": service_id,
         "gold_optical": _row_to_dict(gold_row),
         "optical_candidates": _rows_to_dicts(support_rows),
+        "logical_routes": _rows_to_dicts(logical_routes),
+        "lease_endpoints": _rows_to_dicts(lease_endpoints),
+        "cable_candidates": _rows_to_dicts(cable_candidates),
+        "housing_candidates": _rows_to_dicts(housing_candidates),
     }
 
 
