@@ -458,6 +458,28 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
                     nearby_cables.append(_row_to_dict(r))
                     matched_cable_ids.add(r["cable_id"])
 
+    # Route parcours: routes passing through the service's resolved sites
+    route_parcours: list[dict[str, Any]] = []
+    has_parcours_table = _row_to_dict(
+        con.execute("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_route_parcours'").fetchone()
+    )
+    if has_parcours_table and site_tokens:
+        seen_route_refs: set[str] = set()
+        for token in dict.fromkeys(site_tokens):
+            if len(route_parcours) >= 15:
+                break
+            rows = con.execute(
+                "SELECT route_ref, step_type, site, bpe, cable_in, cable_out "
+                "FROM ref_route_parcours WHERE UPPER(site) LIKE ? "
+                "ORDER BY route_ref, step_no LIMIT 20",
+                (f"%{token}%",),
+            ).fetchall()
+            for r in rows:
+                rr = (r["route_ref"] or "").strip()
+                if rr and rr not in seen_route_refs:
+                    route_parcours.append(_row_to_dict(r))
+                    seen_route_refs.add(rr)
+
     return {
         "service_id": service_id,
         "gold_optical": _row_to_dict(gold_row),
@@ -467,6 +489,7 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
         "cable_candidates": _rows_to_dicts(cable_candidates),
         "housing_candidates": _rows_to_dicts(housing_candidates),
         "nearby_cables_by_site": nearby_cables,
+        "route_parcours_by_site": route_parcours,
     }
 
 

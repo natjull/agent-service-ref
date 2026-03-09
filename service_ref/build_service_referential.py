@@ -514,6 +514,12 @@ LOCATION_RE = re.compile(r'location\s+"([^"]+)"', re.IGNORECASE)
 RAD_SYSTEM_NAME_RE = re.compile(r'^name\s+"([^"]+)"$', re.IGNORECASE)
 HEADER_CLIENT_SITE_RE = re.compile(r"CLIENT\s*:\s*(.*?)\s+SITE\s*:\s*(.*?)\s+DSP\s*:", re.IGNORECASE)
 
+# CO sub-interface patterns (for xconnect / dot1Q parsing)
+SUBIF_NAME_RE = re.compile(r"^(\S+)\.(\d+)$")  # GigabitEthernet0/0/0.2255 → parent, vlan
+DOT1Q_RE = re.compile(r"encapsulation\s+dot1[qQ]\s+(\d+)", re.IGNORECASE)
+XCONNECT_RE = re.compile(r"xconnect\s+(\S+)\s+(\d+)", re.IGNORECASE)
+CO_SITE_CODE_RE = re.compile(r"((?:60|80)[a-z]{2,4}\d)", re.IGNORECASE)  # 60cml1, 80air1
+
 
 def parse_vlan_list(text: str) -> list[int]:
     values: list[int] = []
@@ -909,14 +915,67 @@ def extract_client_site_from_header(header_info: str) -> tuple[str, str]:
     return match.group(1).strip(), match.group(2).strip()
 
 
+def _parse_co_subinterfaces(payload: str) -> list[dict]:
+    """Extract sub-interface blocks from a CO config (dot1Q + xconnect)."""
+    results: list[dict] = []
+    lines = payload.splitlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        iface_m = INTERFACE_START_RE.match(stripped)
+        if not iface_m:
+            i += 1
+            continue
+        iface_name = iface_m.group(1).strip()
+        subif_m = SUBIF_NAME_RE.match(iface_name)
+        if not subif_m:
+            i += 1
+            continue
+        parent_iface = subif_m.group(1)
+        name_vlan = int(subif_m.group(2))
+        desc = ""
+        dot1q_vlan: int | None = None
+        xc_ip = ""
+        xc_circuit = ""
+        i += 1
+        while i < len(lines):
+            s = lines[i].strip()
+            if s in ("!", "#", "exit") or INTERFACE_START_RE.match(s):
+                break
+            if s.lower().startswith("description "):
+                desc = s.split(" ", 1)[1].strip()
+            dq = DOT1Q_RE.search(s)
+            if dq:
+                dot1q_vlan = int(dq.group(1))
+            xc = XCONNECT_RE.search(s)
+            if xc:
+                xc_ip = xc.group(1)
+                xc_circuit = xc.group(2)
+            i += 1
+        site_code_m = CO_SITE_CODE_RE.search(desc)
+        site_code = site_code_m.group(1).lower() if site_code_m else ""
+        results.append({
+            "interface_name": iface_name,
+            "parent_interface": parent_iface,
+            "vlan_id": dot1q_vlan if dot1q_vlan is not None else name_vlan,
+            "description": desc,
+            "site_code": site_code,
+            "xconnect_ip": xc_ip,
+            "xconnect_circuit_id": xc_circuit,
+        })
+    return results
+
+
 def load_network_text_artifacts(con: sqlite3.Connection) -> None:
     LOG.info("Loading network text artifacts")
     device_records = []
     interface_records = []
     vlan_records = []
+    subif_records: list[tuple] = []
     device_counter = 0
     interface_counter = 0
     vlan_counter = 0
+    subif_counter = 0
 
     for path in sorted(CONFIG_DIR.rglob("*.txt")):
         payload = path.read_text(encoding="latin1", errors="ignore")
@@ -1074,15 +1133,37 @@ def load_network_text_artifacts(con: sqlite3.Connection) -> None:
         flush_interface()
         flush_vlan()
 
+        # CO sub-interface extraction (second pass for dot1Q + xconnect)
+        if source_family == "co":
+            for blk in _parse_co_subinterfaces(payload):
+                subif_counter += 1
+                subif_records.append((
+                    f"CSI-{subif_counter:06d}-{safe_hash([device_id, blk['interface_name']])}",
+                    device_id,
+                    hostname,
+                    str(path.relative_to(ROOT)),
+                    blk["interface_name"],
+                    blk["parent_interface"],
+                    blk["vlan_id"],
+                    blk["description"],
+                    blk["site_code"],
+                    blk["xconnect_ip"],
+                    blk["xconnect_circuit_id"],
+                    json.dumps(extract_route_refs(blk["description"]), ensure_ascii=True),
+                ))
+
     con.executemany("insert into ref_network_devices values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", device_records)
     con.executemany("insert into ref_network_interfaces values (?,?,?,?,?,?,?,?,?,?,?)", interface_records)
     con.executemany("insert into ref_network_vlans values (?,?,?,?,?,?,?,?,?,?)", vlan_records)
+    if subif_records:
+        con.executemany("insert into ref_co_subinterface values (?,?,?,?,?,?,?,?,?,?,?,?)", subif_records)
     con.commit()
     LOG.info(
-        "Loaded %s network devices, %s interfaces, %s vlan entries",
+        "Loaded %s network devices, %s interfaces, %s vlan entries, %s CO sub-interfaces",
         len(device_records),
         len(interface_records),
         len(vlan_records),
+        len(subif_records),
     )
 
 
@@ -1640,6 +1721,21 @@ def create_schema(con: sqlite3.Connection) -> None:
             service_refs_json text,
             route_refs_json text,
             normalized_label text
+        );
+
+        create table ref_co_subinterface (
+            subif_id text primary key,
+            device_id text,
+            device_name text,
+            source_file text,
+            interface_name text,
+            parent_interface text,
+            vlan_id integer,
+            description text,
+            site_code text,
+            xconnect_ip text,
+            xconnect_circuit_id text,
+            route_refs_json text
         );
 
         create table party_master (
@@ -4426,7 +4522,17 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                     )
                 )
 
-        if nature_service in {"IRU FON", "Location FON"} and not route_refs:
+        # Site-pair lease matching: for FON services without LEA route refs,
+        # AND for any service where all LEA route refs scored 0 (not found in GDB).
+        _has_valid_route = any(
+            route_index.get(rr) or logical_route_by_ref.get(rr)
+            for rr in route_refs
+        ) if route_refs else False
+        _try_site_pair_lease = (
+            (nature_service in {"IRU FON", "Location FON"} and not route_refs)
+            or (not _has_valid_route)
+        )
+        if _try_site_pair_lease:
             if site_a_id and site_z_id:
                 for lease, site_l1, site_l2 in lease_pair_index.get(tuple(sorted([site_a_id, site_z_id])), []):
                     route_ref = (lease[1] or "").strip().upper()
@@ -4462,7 +4568,8 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                         )
                     )
 
-        if nature_service in {"IRU FON", "Location FON"}:
+        # Cable/housing matching by site tokens + spatial proximity (all services, not FON-only)
+        if True:
             site_tokens = set(extract_place_tokens(endpoint_a_raw, endpoint_z_raw, client_final, principal_external_ref))
             technical_signals = [
                 row for row in service_signal_rows
@@ -4682,14 +4789,38 @@ def reconcile_services(con: sqlite3.Connection) -> None:
 
         if nature_service == "Lan To Lan":
             best_vlan = best_label_candidate(service_seeds, network_vlan_rows, 6)
+
+            # Fallback: single-token match for VLANs when best_label_candidate fails.
+            # best_label_candidate requires 2+ shared tokens (score >= 72), but many VLAN
+            # labels have only 1 meaningful token after stopword removal (e.g. "Amazon/609"
+            # cleans to just "AMAZON"). We try a word-level token search in the VLAN label.
+            # Min 6 chars to avoid generic city names (CREIL, PARIS, SAINT, etc.).
+            if not best_vlan:
+                _vlan_search_tokens: set[str] = set()
+                for _seed in list(service_seeds) + [client_final, endpoint_z_raw]:
+                    for _tok in business_tokens(_seed):
+                        if len(_tok) >= 6:
+                            _vlan_search_tokens.add(_tok)
+                for _tok in sorted(_vlan_search_tokens, key=len, reverse=True):
+                    _vlan_matches = [r for r in network_vlan_rows if r[6] and _tok in norm_text(r[6]).split()]
+                    if len(_vlan_matches) == 1:
+                        best_vlan = (*_vlan_matches[0], 68)
+                        break
+                    if 2 <= len(_vlan_matches) <= 3:
+                        _unique_clean = {clean_business_label(m[6]) for m in _vlan_matches}
+                        if len(_unique_clean) == 1:
+                            best_vlan = (*_vlan_matches[0], 65)
+                            break
+
             if best_vlan:
                 network_vlan_id, device_id, device_name, source_file, source_family, vlan_id, label, *_rest, score = best_vlan
-                network_records.append((service_id, None, None, None, None, None, None, None, network_vlan_id, "network_vlan_label_match", score, None, None, None, None, None, None, json.dumps([vlan_id], ensure_ascii=True)))
+                _vlan_match_rule = "network_vlan_label_match" if score >= 72 else "network_vlan_token_fallback"
+                network_records.append((service_id, None, None, None, None, None, None, None, network_vlan_id, _vlan_match_rule, score, None, None, None, None, None, None, json.dumps([vlan_id], ensure_ascii=True)))
                 evidence_records.append(
                     build_evidence(
                         service_id,
                         "network_vlan",
-                        "network_vlan_label_match",
+                        _vlan_match_rule,
                         score,
                         "ref_network_vlans",
                         network_vlan_id,
