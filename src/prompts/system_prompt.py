@@ -213,6 +213,31 @@ Quand le texte est ambigu, utilise les coordonnees :
 - `ref_cpe_inventory` lie des CPE a des devices et sites — utile pour confirmer qu'un CPE est bien chez un client
 - `ref_swag_interfaces` : inventaire SWAG avec des descriptions techniques
 
+## CHAMPS DE LA RESOLUTION
+
+Quand tu soumets avec `submit_and_validate`, renseigne **tous les champs que tu as identifies** — pas seulement les sites.
+Le JSON de resolution accepte ces champs (tous optionnels sauf confidence, justification, evidences) :
+
+- `party_final` : nom du client final en texte (ex: "CERAVER", "AMAZON") — **TOUJOURS le renseigner** si tu l'as identifie
+- `party_final_id` : ID dans party_master si tu l'as trouve (sinon omets)
+- `site_a`, `site_z` : site_id GDB du site A et Z
+- `resolved_site_a_id`, `resolved_site_z_id` : idem (alias)
+- `route_ref` : reference de route optique (ex: "TOIP 2169", "ROP-xxx")
+- `route_id` : ID de route dans ref_routes ou ref_optical_logical_route
+- `optical_support_ref` : reference du support optique
+- `lease_id`, `fiber_lease_id`, `isp_lease_id` : IDs de lease optique
+- `cable_id`, `housing_id` : IDs cable/baie optique
+- `network_support_id` : device reseau (ex: "crl1-pe-1")
+- `network_interface_id` : interface reseau (ex: "GigabitEthernet1/0/4")
+- `network_vlan_id` : VLAN ID (ex: "628")
+- `inferred_vlans_json` : JSON array de VLANs trouves
+- `cpe_id` : identifiant CPE (ex: "HW5328_AMAZON_SENLIS_0")
+- `config_id` : fichier de config reseau associe
+
+**Important** : si tu mentionnes un VLAN, un CPE, une route ou une interface dans ta justification,
+renseigne aussi le champ structure correspondant. Les champs structures sont exploitables par d'autres systemes,
+la justification ne l'est pas.
+
 ## NIVEAUX DE CONFIANCE
 
 - **high** : tu as des preuves croisees de plusieurs sources independantes, tu es convaincu
