@@ -181,16 +181,36 @@ Tu travailles sur un SQLite. Tu le consultes librement avec `query_db`.
 Tu es libre de ta methode. Voici des pistes :
 
 ### Pour un service L2L
+
+Chaque L2L a un **client final**, des **sites A/Z**, et un **support technique** (VLAN + route optique + CPE).
+Tu dois identifier TOUS ces elements, pas seulement les sites.
+
 1. Lis la ligne LEA brute (dans `lea_raw_lines` du decision pack) — elle contient tout le contexte
 2. Interprete `endpoint_z_raw` : c'est souvent "NOM_CLIENT - VILLE" ou "NOM_CLIENT ADRESSE CODE_POSTAL VILLE"
 3. Cherche ce client dans `party_master`/`party_alias` avec `query_db` ou `resolve_party_candidates`
 4. Cherche le site Z dans `ref_sites` : les sites "POP CLIENT VILLE" correspondent aux POPs client.
    Exemple : `endpoint_z_raw = "CERAVER- PLAILLY"` → cherche `SELECT * FROM ref_sites WHERE reference LIKE '%CERAVER%'`
-5. Si `endpoint_z_raw` contient une adresse, geocode-la via `ref_ban_address` :
-   `SELECT * FROM ref_ban_address WHERE normalized_label LIKE '%RUE DES POTIERS%' AND city LIKE '%MARSEILLE%'`
-   Puis compare les coordonnees (x_l93, y_l93) avec celles des sites GDB pour trouver le plus proche.
-6. Verifie la coherence avec les VLAN, interfaces reseau, CPE si disponible
-7. Le site A est generalement un POP/CO identifiable depuis `endpoint_a_raw`
+5. Si `endpoint_z_raw` contient une adresse, geocode-la via `ref_ban_address` puis compare aux sites GDB.
+6. Le site A est generalement un POP/CO identifiable depuis `endpoint_a_raw`
+
+**VLAN** — cherche SYSTEMATIQUEMENT le VLAN du client :
+- `SELECT * FROM ref_network_vlans WHERE label LIKE '%NOM_CLIENT%'` (ex: label = "ECCF RANTIGNY-LINKT/628")
+- Les labels VLAN suivent le pattern "NOM_CLIENT VILLE/VLAN_ID" ou "CLIENT-LAN2LAN/NOM_CLIENT/VLAN_ID"
+- Si tu trouves un VLAN, renseigne `network_vlan_id` dans la resolution
+
+**Interface reseau** — si un VLAN est trouve, cherche l'interface associee :
+- `SELECT * FROM ref_network_interfaces WHERE description LIKE '%NOM_CLIENT%'` ou par device_name du VLAN
+- Renseigne `network_interface_id`
+
+**Route optique** — verifie `route_refs_json` dans la ligne LEA brute :
+- Si non vide (ex: ["TOIP 2169"]), c'est la route optique du service → renseigne `route_ref`
+- Verifie aussi `service_refs_json` (ex: ["OPE1214/L2L524"]) — ce sont les refs de service
+- Croise avec `ref_optical_logical_route` et `ref_routes`
+
+**CPE** — cherche le CPE du client :
+- `SELECT * FROM ref_cpe_inventory WHERE device_name LIKE '%NOM_CLIENT%'`
+- Les CPE suivent le pattern "HW5328_NOM_CLIENT_VILLE" ou "HWENT_L2L_NOM_CLIENT_VILLE"
+- Renseigne `cpe_id`
 
 ### Pour un service FON (fibre optique noire)
 1. Cherche les references de route dans `route_refs_json` ou `service_refs_json` de la ligne LEA
@@ -208,10 +228,11 @@ Quand le texte est ambigu, utilise les coordonnees :
 
 ### Autres indices
 - `contract_file` contient parfois le nom du client final
-- Les descriptions VLAN (`ref_network_vlans.vlan_name`) et interfaces (`ref_network_interfaces.description`) mentionnent souvent le client
+- `ref_network_vlans.label` et `ref_network_interfaces.description` mentionnent souvent le client
 - Les configs CPE (`search_configs`) peuvent confirmer un site ou un client
-- `ref_cpe_inventory` lie des CPE a des devices et sites — utile pour confirmer qu'un CPE est bien chez un client
+- `ref_cpe_inventory` lie des CPE a des devices et sites
 - `ref_swag_interfaces` : inventaire SWAG avec des descriptions techniques
+- `service_support_reseau` et `service_support_optique` : le pipeline a deja pre-matche certains supports — verifie-les dans le decision pack
 
 ## CHAMPS DE LA RESOLUTION
 
