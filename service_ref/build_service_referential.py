@@ -1181,6 +1181,7 @@ def create_schema(con: sqlite3.Connection) -> None:
         drop table if exists override_party_alias;
         drop table if exists override_site_alias;
         drop table if exists override_service_match;
+        drop table if exists iru_maintenance_reconciliation;
 
         create table lea_active_lines (
             lea_line_id text primary key,
@@ -1904,6 +1905,14 @@ def create_schema(con: sqlite3.Connection) -> None:
             match_type text,
             forced_target_id text,
             comment text
+        );
+
+        create table iru_maintenance_reconciliation (
+            maintenance_service_id text,
+            principal_service_id text,
+            strategy text,
+            match_detail text,
+            lea_lines_moved integer
         );
 
         create index idx_lea_grouping_key on lea_active_lines(grouping_key);
@@ -2889,6 +2898,186 @@ def merge_json_lists(values: Iterable[str]) -> list[str]:
                 merged.append(item)
                 seen.add(item)
     return merged
+
+
+def _extract_command_base(cmd: str) -> str:
+    """Strip trailing .X or -X suffix from a command_internal number."""
+    cmd = (cmd or "").strip()
+    if not cmd:
+        return ""
+    if re.match(r"^.+[.\-]\d+$", cmd):
+        return re.sub(r"[.\-]\d+$", "", cmd)
+    return cmd
+
+
+def _contract_file_base(cf: str) -> str:
+    """Normalise a contract filename for matching: strip .pdf, strip trailing -N/.N suffix."""
+    cf = (cf or "").strip()
+    if not cf:
+        return ""
+    cf = re.sub(r"\.pdf$", "", cf, flags=re.IGNORECASE)
+    cf = cf.strip()
+    if re.match(r"^.+[.\-]\d+$", cf):
+        cf = re.sub(r"[.\-]\d+$", "", cf)
+    return cf.strip()
+
+
+def reconcile_iru_maintenance(con: sqlite3.Connection) -> None:
+    """Post-grouping pass: merge maintenance-only IRU FON services into their principal counterpart."""
+    LOG.info("Starting IRU maintenance reconciliation")
+
+    rows = con.execute(
+        """
+        select s.service_id, s.principal_client, s.nature_service, s.line_count,
+               bl.lea_line_id, bl.role_ligne,
+               l.command_internal, l.contract_file, l.endpoint_a_raw, l.endpoint_z_raw
+        from service_master_active s
+        join service_bss_line bl on bl.service_id = s.service_id
+        join lea_active_lines l on l.lea_line_id = bl.lea_line_id
+        where s.nature_service = 'IRU FON'
+        """
+    ).fetchall()
+
+    # Build per-service info
+    services: dict[str, dict] = {}
+    for row in rows:
+        sid = row[0]
+        if sid not in services:
+            services[sid] = {
+                "client": row[1],
+                "nature": row[2],
+                "line_count": row[3],
+                "roles": set(),
+                "commands": set(),
+                "contracts": set(),
+                "endpoints": set(),
+                "lea_lines": [],
+            }
+        svc = services[sid]
+        svc["roles"].add(row[5])
+        svc["lea_lines"].append(row[4])
+        cmd = (row[6] or "").strip()
+        if cmd:
+            svc["commands"].add(cmd)
+        cf = (row[7] or "").strip()
+        if cf:
+            svc["contracts"].add(cf)
+        ep_a = (row[8] or "").strip()
+        ep_z = (row[9] or "").strip()
+        if ep_a:
+            svc["endpoints"].add(ep_a)
+        if ep_z:
+            svc["endpoints"].add(ep_z)
+
+    # Classify
+    principal_only: dict[str, dict] = {}
+    maintenance_only: dict[str, dict] = {}
+    for sid, info in services.items():
+        if "principal" in info["roles"] and "maintenance" not in info["roles"]:
+            principal_only[sid] = info
+        elif "maintenance" in info["roles"] and "principal" not in info["roles"]:
+            maintenance_only[sid] = info
+
+    if not maintenance_only:
+        LOG.info("IRU maintenance reconciliation: no maintenance-only services found, nothing to do")
+        return
+
+    # Build indexes on principal-only for matching
+    # Index by client + command_base
+    cmd_index: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for sid, info in principal_only.items():
+        for cmd in info["commands"]:
+            base = _extract_command_base(cmd)
+            if base:
+                cmd_index[(info["client"], base)].append(sid)
+
+    # Index by client + contract_file_base
+    contract_index: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for sid, info in principal_only.items():
+        for cf in info["contracts"]:
+            base = _contract_file_base(cf)
+            if base:
+                contract_index[(info["client"], base)].append(sid)
+
+    # Reconcile
+    recon_records = []
+    stats = {"command_base": 0, "contract_file": 0, "endpoint_overlap": 0, "unmatched": 0}
+
+    for m_sid, m_info in maintenance_only.items():
+        matched_principal = None
+        strategy = None
+        detail = ""
+
+        # Strategy 1: command_base
+        for cmd in m_info["commands"]:
+            base = _extract_command_base(cmd)
+            if base:
+                candidates = cmd_index.get((m_info["client"], base), [])
+                if len(candidates) == 1:
+                    matched_principal = candidates[0]
+                    strategy = "command_base"
+                    detail = f"cmd={cmd}->base={base}"
+                    break
+
+        # Strategy 2: contract_file
+        if not matched_principal:
+            for cf in m_info["contracts"]:
+                base = _contract_file_base(cf)
+                if base:
+                    candidates = contract_index.get((m_info["client"], base), [])
+                    if len(candidates) == 1:
+                        matched_principal = candidates[0]
+                        strategy = "contract_file"
+                        detail = f"contract={cf}->base={base}"
+                        break
+
+        # Strategy 3: endpoint_overlap
+        if not matched_principal and m_info["endpoints"]:
+            for p_sid, p_info in principal_only.items():
+                if p_info["client"] != m_info["client"]:
+                    continue
+                overlap = m_info["endpoints"] & p_info["endpoints"]
+                if overlap:
+                    matched_principal = p_sid
+                    strategy = "endpoint_overlap"
+                    detail = f"endpoints={','.join(sorted(overlap))}"
+                    break
+
+        if matched_principal:
+            n_lines = len(m_info["lea_lines"])
+            # Move LEA lines from maintenance service to principal service
+            con.execute(
+                "UPDATE service_bss_line SET service_id = ? WHERE service_id = ?",
+                (matched_principal, m_sid),
+            )
+            # Update line_count on principal
+            con.execute(
+                "UPDATE service_master_active SET line_count = line_count + ?, active_line_count = active_line_count + ? WHERE service_id = ?",
+                (n_lines, n_lines, matched_principal),
+            )
+            # Delete the now-empty maintenance service
+            con.execute("DELETE FROM service_master_active WHERE service_id = ?", (m_sid,))
+            recon_records.append((m_sid, matched_principal, strategy, detail, n_lines))
+            stats[strategy] += 1
+        else:
+            stats["unmatched"] += 1
+
+    if recon_records:
+        con.executemany(
+            "INSERT INTO iru_maintenance_reconciliation VALUES (?,?,?,?,?)",
+            recon_records,
+        )
+
+    con.commit()
+    merged = stats["command_base"] + stats["contract_file"] + stats["endpoint_overlap"]
+    LOG.info(
+        "IRU maintenance reconciliation: %d merged (cmd_base=%d, contract=%d, endpoint=%d), %d unmatched",
+        merged,
+        stats["command_base"],
+        stats["contract_file"],
+        stats["endpoint_overlap"],
+        stats["unmatched"],
+    )
 
 
 def build_site_index(con: sqlite3.Connection) -> tuple[dict[str, list[tuple]], list[tuple]]:
@@ -5718,6 +5907,7 @@ def main() -> None:
     load_network_text_artifacts(con)
     build_party_master(con)
     build_service_master(con)
+    reconcile_iru_maintenance(con)
     reconcile_services(con)
     build_publication_views(con)
     build_facturable_publication(con)
