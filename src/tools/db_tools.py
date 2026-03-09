@@ -168,8 +168,20 @@ def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str,
         else []
     )
 
+    # Fetch raw LEA lines linked to this service via service_key = grouping_key
+    service_key = service["service_key"] if service else None
+    lea_raw_rows: list[dict[str, Any]] = []
+    if service_key:
+        lea_raw_rows = _rows_to_dicts(
+            con.execute(
+                "SELECT * FROM lea_active_lines WHERE grouping_key = ?",
+                (service_key,),
+            ).fetchall()
+        )
+
     return {
         "service": _row_to_dict(service),
+        "lea_raw_lines": lea_raw_rows,
         "review_items": [
             {
                 "review_type": row["review_type"],
@@ -284,22 +296,6 @@ def _resolve_party_candidates(con: sqlite3.Connection, service_id: str) -> dict[
     principal_alias_matches = alias_matches(service["principal_client"])
     client_final_alias_matches = alias_matches(service["client_final"])
 
-    recommended_final_party_id: str | None = None
-    recommended_final_party_name: str | None = None
-    recommendation_confidence = "none"
-    reason = "no deterministic final party candidate found"
-
-    if pipeline_final:
-        recommended_final_party_id = pipeline_final[0]["party_id"]
-        recommended_final_party_name = pipeline_final[0]["canonical_name"]
-        recommendation_confidence = "high"
-        reason = "pipeline final_party already exists"
-    elif client_final_alias_matches:
-        recommended_final_party_id = client_final_alias_matches[0]["party_id"]
-        recommended_final_party_name = client_final_alias_matches[0]["canonical_name"]
-        recommendation_confidence = "medium"
-        reason = "exact alias match on client_final_raw"
-
     return {
         "service_id": service_id,
         "principal_client_raw": service["principal_client"] or "",
@@ -308,10 +304,6 @@ def _resolve_party_candidates(con: sqlite3.Connection, service_id: str) -> dict[
         "pipeline_final_parties": _rows_to_dicts(pipeline_final),
         "principal_client_alias_matches": principal_alias_matches,
         "client_final_alias_matches": client_final_alias_matches,
-        "recommended_final_party_id": recommended_final_party_id,
-        "recommended_final_party_name": recommended_final_party_name,
-        "recommendation_confidence": recommendation_confidence,
-        "reason": reason,
     }
 
 

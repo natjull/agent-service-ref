@@ -129,8 +129,12 @@ def create_agent_options(
         project_context_path=project_context_path,
     )
 
-    # Auth: if an API key is provided, pass it through.
-    agent_env: dict[str, str] = {"CLAUDECODE": ""}
+    # Prevent nested Claude Code detection when launched from a Claude Code session
+    os.environ.pop("CLAUDECODE", None)
+
+    # Auth: if a real API key is provided, pass it through.
+    # Otherwise clear ANTHROPIC_API_KEY so the CLI falls back to Claude Max OAuth.
+    agent_env: dict[str, str] = {"CLAUDECODE": "", "ANTHROPIC_API_KEY": ""}
     if api_key:
         agent_env["ANTHROPIC_API_KEY"] = api_key
 

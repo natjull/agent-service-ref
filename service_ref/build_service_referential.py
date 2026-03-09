@@ -445,7 +445,9 @@ def _crs_to_srid(crs: object) -> str:
         return "EPSG:2154"
     if "27572" in text:
         return "EPSG:27572"
-    if "4326" in text:
+    if "LAMBERT_II" in text or "NTF_LAMBERT" in text or "LAMB2" in text:
+        return "EPSG:27572"
+    if "4326" in text or "WGS" in text:
         return "EPSG:4326"
     return text[:64]
 
@@ -593,8 +595,15 @@ def _extract_ban_value(record: dict[str, object], *keys: str) -> str:
     return ""
 
 
+_CITY_ABBREV = {
+    "ST": "SAINT", "STE": "SAINTE",
+    "MT": "MONT", "GD": "GRAND", "PT": "PETIT",
+}
+
+
 def _normalize_city(value: object) -> str:
     tokens = [token for token in norm_text(value).split() if token not in ADDRESS_NOISE_STOPWORDS]
+    tokens = [_CITY_ABBREV.get(t, t) for t in tokens]
     return " ".join(tokens).strip()
 
 
@@ -617,7 +626,8 @@ def parse_address_seed(value: object) -> dict[str, str]:
         if postcode and postcode in normalized:
             after_postcode = normalized.split(postcode, 1)[1].strip()
             city = _normalize_city(after_postcode)
-            street_tokens = [token for token in tokens[street_idx:] if token != postcode]
+            city_tokens = set(city.split()) if city else set()
+            street_tokens = [token for token in tokens[street_idx:] if token != postcode and token not in city_tokens]
         elif len(tokens[street_idx:]) >= 3:
             city = _normalize_city(tokens[-1])
             street_tokens = tokens[street_idx:-1]
@@ -1076,6 +1086,65 @@ def load_network_text_artifacts(con: sqlite3.Connection) -> None:
     )
 
 
+_ENDPOINT_ADDR_SPLIT_RE = re.compile(
+    r"\s+\d+\s+(?:rue|av(?:enue)?|route|boulevard|impasse|all[eé]e|chemin|place|r\.)\b"
+    r"|\s+\d{5}\s",
+    re.IGNORECASE,
+)
+
+# Known Oise city names appearing in endpoint_z that are NOT client names
+_OISE_CITIES = frozenset(norm_text(c) for c in [
+    "AMIENS", "BEAUVAIS", "COMPIEGNE", "SENLIS", "CREIL", "NOYON", "CHANTILLY",
+    "CLERMONT", "MERU", "LAON", "PLAILLY", "THOUROTTE", "CHAMBLY", "RANTIGNY",
+    "JAUX", "GOUVIEUX", "PIERREFONDS", "RIBECOURT", "FORMERIE", "GRANDVILLIERS",
+    "BRETEUIL", "SAINT QUENTIN", "SOISSONS", "VILLERS COTTERETS",
+])
+
+
+def _extract_client_from_endpoint(endpoint_z: str) -> str:
+    """Extract the client name from a L2L endpoint_z_raw.
+
+    Pattern: 'CLIENT_NAME [address] [postcode] [city]'
+    Returns the client name part, stripping address/city suffix.
+    """
+    raw = str(endpoint_z or "").strip()
+    if not raw:
+        return ""
+    # Split before first house number + street type, or before postcode
+    parts = _ENDPOINT_ADDR_SPLIT_RE.split(raw, 1)
+    candidate = parts[0].strip().rstrip("-").rstrip("_").strip()
+    # Remove trailing known city names
+    normalized = norm_text(candidate)
+    tokens = normalized.split()
+    # Strip trailing city tokens
+    while tokens and tokens[-1] in _OISE_CITIES:
+        tokens.pop()
+    if not tokens:
+        return ""
+    return " ".join(tokens).strip()
+
+
+def _extract_client_from_pop_name(reference: str) -> str:
+    """Extract the client name from a GDB site reference like 'POP CLIENT VILLE'.
+
+    Strips the 'POP ' prefix and trailing city/parenthetical.
+    """
+    raw = str(reference or "").strip()
+    if not raw.upper().startswith("POP "):
+        return ""
+    name = raw[4:].strip()
+    # Remove parenthetical suffix like '(VILLE)'
+    name = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
+    normalized = norm_text(name)
+    tokens = normalized.split()
+    # Strip trailing city tokens
+    while tokens and tokens[-1] in _OISE_CITIES:
+        tokens.pop()
+    if not tokens:
+        return ""
+    return " ".join(tokens).strip()
+
+
 def build_party_master(con: sqlite3.Connection) -> None:
     LOG.info("Building party master")
     party_sources: list[tuple[str, str, str, str, int]] = []
@@ -1096,7 +1165,24 @@ def build_party_master(con: sqlite3.Connection) -> None:
         label = clean_business_label(row[0]) or row[0]
         party_sources.append((label, row[0], "device_client_hint", "ref_network_devices", 75))
 
-    priority_order = {"contractant": 1, "client_final": 2, "device_client_hint": 3, "network_vlan": 4, "network_interface": 5}
+    # Extract client final hints from L2L endpoint_z_raw (name before address)
+    for row in con.execute(
+        "select distinct endpoint_z_raw from lea_active_lines "
+        "where trim(endpoint_z_raw) <> '' and nature_service = 'Lan To Lan'"
+    ):
+        client_hint = _extract_client_from_endpoint(row[0])
+        if client_hint and len(client_hint) >= 3:
+            party_sources.append((client_hint, row[0], "endpoint_client_hint", "lea_active_lines", 80))
+
+    # Extract client names from GDB site references (POP CLIENT VILLE pattern)
+    for row in con.execute(
+        "select distinct reference from ref_sites where reference LIKE 'POP %'"
+    ):
+        client_hint = _extract_client_from_pop_name(row[0])
+        if client_hint and len(client_hint) >= 3:
+            party_sources.append((client_hint, row[0], "site_client_hint", "ref_sites", 75))
+
+    priority_order = {"contractant": 1, "client_final": 2, "endpoint_client_hint": 3, "site_client_hint": 4, "device_client_hint": 5, "network_vlan": 6, "network_interface": 7}
     by_norm: dict[str, list[tuple[str, str, str, str, int]]] = defaultdict(list)
     for canonical_candidate, alias_value, party_type, source_table, source_priority in party_sources:
         normalized = norm_text(canonical_candidate)
