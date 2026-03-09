@@ -194,9 +194,9 @@ Commence TOUJOURS par lire `lea_raw_lines` dans le decision pack. La ligne LEA c
 
 Identifie le client final, puis lance les strategies ci-dessous.
 
-### Strategie 1 : Reseau → VLAN → Device → Route optique (L2L)
+### Strategie 1 : Reseau → VLAN + Interface + CPE (L2L)
 
-C'est le chemin **le plus fiable** pour les L2L. Un ingenieur commence par le reseau.
+Pour les L2L, le reseau donne le VLAN, l'interface, et le CPE du client.
 
 **1a. Trouver le VLAN du client** dans `ref_network_vlans` :
 ```sql
@@ -214,26 +214,21 @@ SELECT * FROM ref_network_interfaces WHERE device_name = 'CRL1-SW-4' AND descrip
 ```
 → Renseigne `network_support_id` (device) et `network_interface_id` (interface)
 
-**1c. Chercher les TOIP sur ce device** : les autres interfaces du meme switch ont souvent
-la ref de route optique dans leur description
-```sql
-SELECT interface_name, description, route_refs_json FROM ref_network_interfaces
-WHERE device_name = 'CRL1-SW-4' AND route_refs_json != '[]'
-```
-→ Si tu trouves un TOIP, renseigne `route_ref`
-
-**1d. Verifier dans SWAG** : `ref_swag_interfaces` a des descriptions techniques riches
+**1c. Verifier dans SWAG** : `ref_swag_interfaces` a des descriptions techniques riches
 ```sql
 SELECT * FROM ref_swag_interfaces WHERE description LIKE '%NOM_CLIENT%'
-SELECT * FROM ref_swag_interfaces WHERE description LIKE '%TOIP%' AND hostname LIKE '%crl1%'
 ```
 
-**1e. Chercher le CPE** :
+**1d. Chercher le CPE** :
 ```sql
 SELECT * FROM ref_cpe_inventory WHERE device_name LIKE '%NOM_CLIENT%'
 ```
 Patterns CPE : `HW5328_NOM_CLIENT_VILLE`, `HWENT_L2L_NOM_CLIENT_VILLE`
 → Renseigne `cpe_id`
+
+**Note** : les TOIP (refs de routes optiques) sont dans les descriptions d'interfaces des **CO**
+(centraux : CRL1-CO-1, BEA1-CO-1, etc.), PAS dans les switches clients (SW). Le VLAN est sur le SW,
+la route optique est sur le CO. Pour trouver la route, utilise la strategie 2 ou 3.
 
 ### Strategie 2 : Site → Topologie physique GDB → Lease → Route (FON et L2L)
 
