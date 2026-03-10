@@ -35,7 +35,7 @@
 - Rows with site Z: 379
 - Rows with network support: 236
 - Rows with optical support: 550
-- Rows with usable spatial evidence: 37
+- Rows with usable spatial evidence: 38
 
 ## Notes
 - Optical matching is built directly from the GDB: logical refs (`TOIP`, `00FT`, `FREE`) plus physical cables and housings.

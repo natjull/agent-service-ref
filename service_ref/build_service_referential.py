@@ -3784,22 +3784,6 @@ def score_label_match(seeds: Iterable[str], candidate: str) -> int:
     return best_score
 
 
-def best_label_candidate(seeds: Iterable[str], candidates: list[tuple], label_index: int) -> tuple | None:
-    best_row = None
-    best_score = 0
-    second_score = 0
-    for row in candidates:
-        score = score_label_match(seeds, row[label_index])
-        if score > best_score:
-            second_score = best_score
-            best_score = score
-            best_row = row
-        elif score > second_score:
-            second_score = score
-    if best_row and best_score >= 72 and (best_score - second_score >= 10 or best_score >= 90):
-        return (*best_row, best_score)
-    return None
-
 
 def party_id_for_alias(alias_index: dict[str, str], value: str) -> str | None:
     normalized = norm_text(value)
@@ -4871,41 +4855,29 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                                                       "network_interface_label", _iscore,
                                                       "ref_network_interfaces", _irow[0]))
 
-            best_device = best_label_candidate(
-                service_seeds,
-                [
-                    (
-                        row[0],
-                        row[1],
-                        " ".join(part for part in [row[7], row[8], row[5]] if part),
-                        row[7],
-                        row[8],
-                        row[5],
-                        row[11],
+            _inserted_devices: set[str] = set()
+            for _drow_raw in network_device_rows:
+                _dcombined = " ".join(part for part in [_drow_raw[7], _drow_raw[8], _drow_raw[5]] if part)
+                _dscore = score_label_match(service_seeds, _dcombined)
+                if _dscore >= 72 and _drow_raw[0] not in _inserted_devices:
+                    _inserted_devices.add(_drow_raw[0])
+                    _dcpe_match = cpe_by_hostname.get(norm_text(_drow_raw[1]))
+                    _dcpe_id = _dcpe_match[0] if _dcpe_match else None
+                    network_records.append((service_id, None, None, None, None, None, None, None, None, None, None, _dcpe_id, "device_label_to_cpe" if _dcpe_id else None, _dscore if _dcpe_id else None, None, None, None, _drow_raw[11] or json.dumps([], ensure_ascii=True)))
+                    evidence_records.append(
+                        build_evidence(
+                            service_id,
+                            "network_device",
+                            "network_device_label_match",
+                            _dscore,
+                            "ref_network_devices",
+                            _drow_raw[0],
+                            {"device_name": _drow_raw[1], "client_hint": _drow_raw[7], "site_hint": _drow_raw[8], "announcement": _drow_raw[5]},
+                        )
                     )
-                    for row in network_device_rows
-                ],
-                2,
-            )
-            if best_device:
-                device_id, device_name, _combined_label, client_hint, site_hint, announcement, vlans_json, score = best_device
-                cpe_match = cpe_by_hostname.get(norm_text(device_name))
-                cpe_id = cpe_match[0] if cpe_match else None
-                network_records.append((service_id, None, None, None, None, None, None, None, None, None, None, cpe_id, "device_label_to_cpe" if cpe_id else None, score if cpe_id else None, None, None, None, vlans_json or json.dumps([], ensure_ascii=True)))
-                evidence_records.append(
-                    build_evidence(
-                        service_id,
-                        "network_device",
-                        "network_device_label_match",
-                        score,
-                        "ref_network_devices",
-                        device_id,
-                        {"device_name": device_name, "client_hint": client_hint, "site_hint": site_hint, "announcement": announcement},
-                    )
-                )
-                party_id = party_id_for_alias(party_alias_index, client_hint or site_hint)
-                if party_id:
-                    service_party_records.append((service_id, "final_party", party_id, "network_device_label", score, "ref_network_devices", device_id))
+                    _dparty_id = party_id_for_alias(party_alias_index, _drow_raw[7] or _drow_raw[8])
+                    if _dparty_id:
+                        service_party_records.append((service_id, "final_party", _dparty_id, "network_device_label", _dscore, "ref_network_devices", _drow_raw[0]))
 
             if not exact_network_hit:
                 _cpe_seed = client_final or endpoint_z_raw or endpoint_a_raw
