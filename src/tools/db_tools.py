@@ -204,8 +204,8 @@ def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str,
         ],
         "party_rows": _rows_to_dicts(party_rows),
         "endpoint_rows": _rows_to_dicts(endpoint_rows),
-        "network_support_rows": _rows_to_dicts(network_support_rows),
-        "optical_support_rows": _rows_to_dicts(optical_support_rows),
+        "network_pipeline_hints": _rows_to_dicts(network_support_rows),
+        "optical_pipeline_hints": _rows_to_dicts(optical_support_rows),
         "lea_signal_rows": _rows_to_dicts(lea_signal_rows),
         "spatial_seed_rows": _rows_to_dicts(spatial_seed_rows),
         "spatial_evidence_rows": [
@@ -483,7 +483,7 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
     return {
         "service_id": service_id,
         "gold_optical": _row_to_dict(gold_row),
-        "optical_candidates": _rows_to_dicts(support_rows),
+        "pipeline_hints": _rows_to_dicts(support_rows),  # candidats pipeline (hints, pas verites)
         "logical_routes": _rows_to_dicts(logical_routes),
         "lease_endpoints": _rows_to_dicts(lease_endpoints),
         "cable_candidates": _rows_to_dicts(cable_candidates),
@@ -494,46 +494,15 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
 
 
 def _resolve_network_candidates(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
-    gold_cols = {
-        row["name"] for row in con.execute('PRAGMA table_info("gold_service_active")').fetchall()
-    }
-    network_cols = {
-        row["name"] for row in con.execute('PRAGMA table_info("service_support_reseau")').fetchall()
-    }
-    gold_select = [
-        col
-        for col in ("interface_id", "network_interface_id", "network_vlan_id", "cpe_id", "config_id", "inferred_vlans_json")
-        if col in gold_cols
-    ]
-    network_select = [
-        col
-        for col in (
-            "service_ref", "interface_id", "interface_match_rule", "interface_score",
-            "network_interface_id", "network_interface_match_rule", "network_interface_score",
-            "network_vlan_id", "network_vlan_match_rule", "network_vlan_score",
-            "cpe_id", "cpe_match_rule", "cpe_score",
-            "config_id", "config_match_rule", "config_score", "inferred_vlans_json",
-            "device_name", "interface_name",
-        )
-        if col in network_cols
-    ]
-    gold_row = (
-        con.execute(
-            f'SELECT {", ".join(gold_select)} FROM gold_service_active WHERE service_id = ?',
-            (service_id,),
-        ).fetchone()
-        if gold_select
-        else None
-    )
-    support_rows = (
-        con.execute(
-            f'SELECT {", ".join(network_select)} FROM service_support_reseau WHERE service_id = ?',
-            (service_id,),
-        ).fetchall()
-        if network_select
-        else []
-    )
-    payload = {
+    # 1. Gold et hints pipeline (service_support_reseau apres Phase 2.1 = multi-VLAN)
+    gold_cols = {row["name"] for row in con.execute('PRAGMA table_info("gold_service_active")').fetchall()}
+    network_cols = {row["name"] for row in con.execute('PRAGMA table_info("service_support_reseau")').fetchall()}
+    gold_select = [col for col in ("interface_id", "network_interface_id", "network_vlan_id", "cpe_id", "config_id", "inferred_vlans_json") if col in gold_cols]
+    network_select = [col for col in ("service_ref", "interface_id", "interface_match_rule", "interface_score", "network_interface_id", "network_interface_match_rule", "network_interface_score", "network_vlan_id", "network_vlan_match_rule", "network_vlan_score", "cpe_id", "cpe_match_rule", "cpe_score", "config_id", "config_match_rule", "config_score", "inferred_vlans_json") if col in network_cols]
+    gold_row = con.execute(f'SELECT {", ".join(gold_select)} FROM gold_service_active WHERE service_id = ?', (service_id,)).fetchone() if gold_select else None
+    support_rows = con.execute(f'SELECT {", ".join(network_select)} FROM service_support_reseau WHERE service_id = ?', (service_id,)).fetchall() if network_select else []
+
+    payload: dict[str, Any] = {
         "service_id": service_id,
         "gold_network": _row_to_dict(gold_row),
         "network_candidates": _rows_to_dicts(support_rows),
@@ -543,6 +512,104 @@ def _resolve_network_candidates(con: sqlite3.Connection, service_id: str) -> dic
     for row in payload["network_candidates"]:
         if row.get("inferred_vlans_json"):
             row["inferred_vlans"] = json.loads(row["inferred_vlans_json"])
+
+    # 2. Tokens client pour les sections de recherche directe
+    svc = con.execute(
+        "SELECT client_final, endpoint_z_raw, endpoint_a_raw FROM service_master_active WHERE service_id = ?",
+        (service_id,),
+    ).fetchone()
+    _NOISE = {"SAINT", "ROUTE", "AVENUE", "FRANCE", "AGENCE", "COMPLETEL", "ADISTA", "HEXANET", "TELOISE", "TELECOM"}
+    client_tokens: list[str] = []
+    if svc:
+        for field in (svc["client_final"], svc["endpoint_z_raw"]):
+            if field:
+                for tok in re.split(r"[^A-Za-z0-9]+", field.upper()):
+                    if len(tok) >= 5 and tok not in _NOISE and tok not in client_tokens:
+                        client_tokens.append(tok)
+
+    # 3. vlans_by_label : recherche directe dans ref_network_vlans par tokens client
+    vlans_by_label: list[dict[str, Any]] = []
+    seen_vlan_ids: set[str] = set()
+    for tok in dict.fromkeys(client_tokens):
+        if len(vlans_by_label) >= 20:
+            break
+        rows = con.execute(
+            "SELECT network_vlan_id, device_name, device_id, vlan_id, label, service_refs_json, route_refs_json "
+            "FROM ref_network_vlans WHERE UPPER(normalized_label) LIKE ? LIMIT 15",
+            (f"%{tok}%",),
+        ).fetchall()
+        for r in rows:
+            vid = r["network_vlan_id"]
+            if vid not in seen_vlan_ids:
+                vlans_by_label.append(_row_to_dict(r))
+                seen_vlan_ids.add(vid)
+    payload["vlans_by_label"] = vlans_by_label
+
+    # 4. co_subinterfaces : CO dot1Q portant les VLANs candidats OU circuit_id LEA
+    co_subinterfaces: list[dict[str, Any]] = []
+    seen_subif: set[str] = set()
+
+    # 4a. Par VLANs de service_support_reseau → ref_network_vlans.vlan_id → ref_co_subinterface
+    rows = con.execute(
+        """
+        SELECT cs.subif_id, cs.device_name, cs.interface_name, cs.vlan_id, cs.description,
+               cs.site_code, cs.xconnect_ip, cs.xconnect_circuit_id
+        FROM ref_co_subinterface cs
+        JOIN ref_network_vlans nv ON nv.vlan_id = cs.vlan_id
+        JOIN service_support_reseau sr ON sr.network_vlan_id = nv.network_vlan_id
+        WHERE sr.service_id = ?
+        LIMIT 30
+        """,
+        (service_id,),
+    ).fetchall()
+    for r in rows:
+        if r["subif_id"] not in seen_subif:
+            co_subinterfaces.append(_row_to_dict(r))
+            seen_subif.add(r["subif_id"])
+
+    # 4b. Par circuit_id depuis signals LEA (route_refs_json)
+    if len(co_subinterfaces) < 15:
+        circuit_ids: set[str] = set()
+        for sig in con.execute(
+            "SELECT route_refs_json FROM service_lea_signal WHERE service_id = ? AND route_refs_json IS NOT NULL",
+            (service_id,),
+        ).fetchall():
+            try:
+                for ref in json.loads(sig["route_refs_json"]):
+                    if ref and len(ref) >= 4:
+                        circuit_ids.add(ref.strip())
+            except (json.JSONDecodeError, TypeError):
+                pass
+        for cid in circuit_ids:
+            if len(co_subinterfaces) >= 20:
+                break
+            for r in con.execute(
+                "SELECT subif_id, device_name, interface_name, vlan_id, description, "
+                "site_code, xconnect_ip, xconnect_circuit_id "
+                "FROM ref_co_subinterface WHERE xconnect_circuit_id = ? LIMIT 5",
+                (cid,),
+            ).fetchall():
+                if r["subif_id"] not in seen_subif:
+                    co_subinterfaces.append(_row_to_dict(r))
+                    seen_subif.add(r["subif_id"])
+    payload["co_subinterfaces"] = co_subinterfaces
+
+    # 5. cpe_candidates : recherche directe ref_cpe_inventory par tokens client
+    cpe_candidates: list[dict[str, Any]] = []
+    seen_cpe: set[str] = set()
+    for tok in dict.fromkeys(client_tokens):
+        if len(cpe_candidates) >= 10:
+            break
+        for r in con.execute(
+            "SELECT cpe_id, hostname, normalized_hostname, source "
+            "FROM ref_cpe_inventory WHERE normalized_hostname LIKE ? LIMIT 5",
+            (f"%{tok.lower()}%",),
+        ).fetchall():
+            if r["cpe_id"] not in seen_cpe:
+                cpe_candidates.append(_row_to_dict(r))
+                seen_cpe.add(r["cpe_id"])
+    payload["cpe_candidates"] = cpe_candidates
+
     return payload
 
 

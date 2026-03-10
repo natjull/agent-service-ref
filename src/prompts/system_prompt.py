@@ -54,8 +54,7 @@ def _live_stats(db_path: Path) -> str:
 
         return (
             f"- Services actifs: {total}\n"
-            f"- Auto-valides pipeline: {auto_valid}\n"
-            f"- En review queue: {review_required}\n"
+            f"- En attente agent (review_required): {review_required}\n"
             f"- Resolutions agent: {agent_count}\n"
             f"- Restants: {total - agent_count}"
         )
@@ -141,8 +140,9 @@ Tu travailles sur un SQLite. Tu le consultes librement avec `query_db`.
 
 ### Tables Gold (pre-calculees par le pipeline)
 - `service_master_active` : pivot — un service = un objet facturable actif
-- `service_party`, `service_endpoint`, `service_support_optique`, `service_support_reseau` : rattachements pipeline
-- `gold_service_active` : etat (auto_valid / review_required)
+- `service_party`, `service_endpoint` : rattachements pipeline (sites, clients)
+- `service_support_optique`, `service_support_reseau` : **hints de retrieval pipeline** — candidats bruts avec scores. Ce ne sont pas des matchs valides, c'est toi qui decides.
+- `gold_service_active` : etat de workflow (tous a `review_required`) — colonnes optique/reseau = meilleur candidat pipeline, pas une verite
 
 ### Tables agent (ecriture)
 - `agent_resolutions`, `agent_evidence` : tes resolutions
@@ -156,7 +156,7 @@ Tu travailles sur un SQLite. Tu le consultes librement avec `query_db`.
 - `resolve_lea_signal_candidates` : signaux LEA interpretes et classes pour un service
 - `resolve_party_candidates` : candidats party (contractant + final) avec alias matches
 - `resolve_optical_candidates` : supports optiques candidats (routes, leases, cables)
-- `resolve_network_candidates` : supports reseau candidats (devices, interfaces, VLANs)
+- `resolve_network_candidates` : VLANs par label client (`vlans_by_label`), sub-interfaces CO endpoint A (`co_subinterfaces`), CPE candidats (`cpe_candidates`), plus hints pipeline multi-VLAN (`network_candidates`)
 - `resolve_spatial_candidates` : evidences spatiales (distances BAN/GDB vers sites)
 - `search_configs` : grep dans les configs reseau (RANCID, CPE Huawei/RAD)
 - `read_config_file` : lire un fichier de config reseau complet
@@ -192,8 +192,9 @@ Lis `lea_raw_lines` dans le decision pack. La ligne LEA contient :
 - `route_refs_json` : refs de route extraites (ex: `["TOIP 2169"]`)
 - `contract_file` : parfois le nom du client final
 
-Verifie les pre-matches pipeline (`service_support_reseau`, `service_support_optique`).
-Si un match existe avec un bon score (>= 80), confirme-le et continue.
+Consulte les hints pipeline (`service_support_reseau`, `service_support_optique`).
+Ce sont des pistes de retrieval, pas des matchs valides. Un score eleve signifie une bonne piste a verifier,
+pas une decision finale. C'est toi qui valides ou rejettes.
 
 ### VLAN (pour L2L)
 
@@ -261,8 +262,8 @@ Documente dans la justification : ce que tu as cherche, ou, et pourquoi ca n'a p
 | Connexions | `ref_optical_connection` | `housing_migration_oid`, `obj1_migration_oid` |
 | Routes optiques | `ref_routes` + `ref_optical_logical_route` | `route_ref`, `ref_exploit` |
 | Parcours routes | `ref_route_parcours` | `route_ref`, `site`, `bpe`, `cable_in`, `cable_out` |
-| Pre-match reseau | `service_support_reseau` | `network_vlan_id`, `cpe_id` |
-| Pre-match optique | `service_support_optique` | `route_ref`, `route_score` |
+| Hints pipeline reseau | `service_support_reseau` | `network_vlan_id`, `network_vlan_score`, `cpe_id` |
+| Hints pipeline optique | `service_support_optique` | `route_ref`, `route_score`, `lease_id`, `cable_id` |
 
 ## CHAMPS DE LA RESOLUTION
 

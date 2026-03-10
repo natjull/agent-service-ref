@@ -4788,14 +4788,29 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                     service_party_records.append((service_id, "final_party", party_id, "network_device_hint", 80, "ref_network_devices", device[0]))
 
         if nature_service == "Lan To Lan":
-            best_vlan = best_label_candidate(service_seeds, network_vlan_rows, 6)
+            # Multi-candidate VLAN: insere TOUS les VLANs avec score >= 65 (label match).
+            # L'agent decide lequel est le bon — pas de gagnant unique pre-selectionne.
+            _inserted_vlans: set[str] = set()
+            for _vrow in network_vlan_rows:
+                _vscore = score_label_match(service_seeds, _vrow[6])
+                if _vscore >= 65 and _vrow[0] not in _inserted_vlans:
+                    _inserted_vlans.add(_vrow[0])
+                    network_records.append((service_id, None, None, None, None, None, None, None,
+                                            _vrow[0], "vlan_label_match", _vscore,
+                                            None, None, None, None, None, None,
+                                            json.dumps([_vrow[5]], ensure_ascii=True)))
+                    evidence_records.append(build_evidence(
+                        service_id, "network_vlan", "vlan_label_match", _vscore,
+                        "ref_network_vlans", _vrow[0],
+                        {"device_name": _vrow[2], "vlan_id": _vrow[5], "label": _vrow[6]},
+                    ))
+                    _vparty = party_id_for_alias(party_alias_index, _vrow[6])
+                    if _vparty:
+                        service_party_records.append((service_id, "final_party", _vparty,
+                                                      "network_vlan_label", _vscore, "ref_network_vlans", _vrow[0]))
 
-            # Fallback: single-token match for VLANs when best_label_candidate fails.
-            # best_label_candidate requires 2+ shared tokens (score >= 72), but many VLAN
-            # labels have only 1 meaningful token after stopword removal (e.g. "Amazon/609"
-            # cleans to just "AMAZON"). We try a word-level token search in the VLAN label.
-            # Min 6 chars to avoid generic city names (CREIL, PARIS, SAINT, etc.).
-            if not best_vlan:
+            # Token fallback: si aucun match label, cherche par token exact (min 6 chars).
+            if not _inserted_vlans:
                 _vlan_search_tokens: set[str] = set()
                 for _seed in list(service_seeds) + [client_final, endpoint_z_raw]:
                     for _tok in business_tokens(_seed):
@@ -4804,51 +4819,57 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                 for _tok in sorted(_vlan_search_tokens, key=len, reverse=True):
                     _vlan_matches = [r for r in network_vlan_rows if r[6] and _tok in norm_text(r[6]).split()]
                     if len(_vlan_matches) == 1:
-                        best_vlan = (*_vlan_matches[0], 68)
+                        _r = _vlan_matches[0]
+                        if _r[0] not in _inserted_vlans:
+                            _inserted_vlans.add(_r[0])
+                            network_records.append((service_id, None, None, None, None, None, None, None,
+                                                    _r[0], "network_vlan_token_fallback", 68,
+                                                    None, None, None, None, None, None,
+                                                    json.dumps([_r[5]], ensure_ascii=True)))
+                            evidence_records.append(build_evidence(
+                                service_id, "network_vlan", "network_vlan_token_fallback", 68,
+                                "ref_network_vlans", _r[0],
+                                {"device_name": _r[2], "vlan_id": _r[5], "label": _r[6], "token": _tok},
+                            ))
                         break
                     if 2 <= len(_vlan_matches) <= 3:
                         _unique_clean = {clean_business_label(m[6]) for m in _vlan_matches}
                         if len(_unique_clean) == 1:
-                            best_vlan = (*_vlan_matches[0], 65)
-                            break
+                            _r = _vlan_matches[0]
+                            if _r[0] not in _inserted_vlans:
+                                _inserted_vlans.add(_r[0])
+                                network_records.append((service_id, None, None, None, None, None, None, None,
+                                                        _r[0], "network_vlan_token_fallback", 65,
+                                                        None, None, None, None, None, None,
+                                                        json.dumps([_r[5]], ensure_ascii=True)))
+                                evidence_records.append(build_evidence(
+                                    service_id, "network_vlan", "network_vlan_token_fallback", 65,
+                                    "ref_network_vlans", _r[0],
+                                    {"device_name": _r[2], "vlan_id": _r[5], "label": _r[6], "token": _tok},
+                                ))
+                        break
 
-            if best_vlan:
-                network_vlan_id, device_id, device_name, source_file, source_family, vlan_id, label, *_rest, score = best_vlan
-                _vlan_match_rule = "network_vlan_label_match" if score >= 72 else "network_vlan_token_fallback"
-                network_records.append((service_id, None, None, None, None, None, None, None, network_vlan_id, _vlan_match_rule, score, None, None, None, None, None, None, json.dumps([vlan_id], ensure_ascii=True)))
-                evidence_records.append(
-                    build_evidence(
-                        service_id,
-                        "network_vlan",
-                        _vlan_match_rule,
-                        score,
-                        "ref_network_vlans",
-                        network_vlan_id,
-                        {"device_name": device_name, "vlan_id": vlan_id, "label": label},
-                    )
-                )
-                party_id = party_id_for_alias(party_alias_index, label)
-                if party_id:
-                    service_party_records.append((service_id, "final_party", party_id, "network_vlan_label", score, "ref_network_vlans", network_vlan_id))
-
-            best_interface = best_label_candidate(service_seeds, network_interface_rows, 6)
-            if best_interface:
-                (network_interface_id, device_id, device_name, source_file, source_family, interface_name, description, _service_refs_json, _route_refs_json, vlan_ids_json, _normalized_label, score) = best_interface
-                network_records.append((service_id, None, None, None, None, network_interface_id, "network_interface_label_match", score, None, None, None, None, None, None, None, None, None, vlan_ids_json or json.dumps([], ensure_ascii=True)))
-                evidence_records.append(
-                    build_evidence(
-                        service_id,
-                        "network_interface",
-                        "network_interface_label_match",
-                        score,
-                        "ref_network_interfaces",
-                        network_interface_id,
-                        {"device_name": device_name, "interface_name": interface_name, "description": description, "vlans": json.loads(vlan_ids_json or "[]")},
-                    )
-                )
-                party_id = party_id_for_alias(party_alias_index, description)
-                if party_id:
-                    service_party_records.append((service_id, "final_party", party_id, "network_interface_label", score, "ref_network_interfaces", network_interface_id))
+            # Multi-candidate interfaces : toutes les descriptions avec score >= 72.
+            _inserted_ifaces: set[str] = set()
+            for _irow in network_interface_rows:
+                _iscore = score_label_match(service_seeds, _irow[6])  # index 6 = description
+                if _iscore >= 72 and _irow[0] not in _inserted_ifaces:
+                    _inserted_ifaces.add(_irow[0])
+                    network_records.append((service_id, None, None, None, None,
+                                            _irow[0], "network_interface_label_match", _iscore,
+                                            None, None, None, None, None, None, None, None, None,
+                                            _irow[9] or json.dumps([], ensure_ascii=True)))
+                    evidence_records.append(build_evidence(
+                        service_id, "network_interface", "network_interface_label_match", _iscore,
+                        "ref_network_interfaces", _irow[0],
+                        {"device_name": _irow[2], "interface_name": _irow[5], "description": _irow[6],
+                         "vlans": json.loads(_irow[9] or "[]")},
+                    ))
+                    _iparty = party_id_for_alias(party_alias_index, _irow[6])
+                    if _iparty:
+                        service_party_records.append((service_id, "final_party", _iparty,
+                                                      "network_interface_label", _iscore,
+                                                      "ref_network_interfaces", _irow[0]))
 
             best_device = best_label_candidate(
                 service_seeds,
@@ -4887,9 +4908,8 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                     service_party_records.append((service_id, "final_party", party_id, "network_device_label", score, "ref_network_devices", device_id))
 
             if not exact_network_hit:
-                cpe_match = match_cpe(client_final or endpoint_z_raw or endpoint_a_raw, cpe_rows)
-                if cpe_match:
-                    cpe_id, hostname, score = cpe_match
+                _cpe_seed = client_final or endpoint_z_raw or endpoint_a_raw
+                for cpe_id, hostname, score in match_cpe(_cpe_seed, cpe_rows):
                     network_records.append((service_id, None, None, None, None, None, None, None, None, None, None, cpe_id, "cpe_token_overlap", score, None, None, None, json.dumps([], ensure_ascii=True)))
                     evidence_records.append(
                         build_evidence(
@@ -4899,7 +4919,7 @@ def reconcile_services(con: sqlite3.Connection) -> None:
                             score,
                             "ref_cpe_inventory",
                             cpe_id,
-                            {"hostname": hostname, "seed": client_final or endpoint_z_raw or endpoint_a_raw},
+                            {"hostname": hostname, "seed": _cpe_seed},
                         )
                     )
 
@@ -4949,22 +4969,23 @@ def reconcile_services(con: sqlite3.Connection) -> None:
     )
 
 
-def match_cpe(seed: str, cpe_rows: list[tuple]) -> tuple[str, str, int] | None:
+def match_cpe(seed: str, cpe_rows: list[tuple]) -> list[tuple[str, str, int]]:
+    """Return up to 5 CPE candidates (cpe_id, hostname, score) with token overlap >= 2."""
     normalized = norm_text(seed)
     if not normalized:
-        return None
+        return []
     seed_tokens = {token for token in normalized.split() if len(token) >= 5}
-    best = None
-    best_score = 0
+    results: list[tuple[str, str, int]] = []
+    seen: set[str] = set()
     for cpe_id, hostname, normalized_hostname in cpe_rows:
+        if cpe_id in seen:
+            continue
         host_tokens = set((normalized_hostname or "").split())
         overlap = len(seed_tokens & host_tokens)
         if overlap >= 2:
-            score = min(85, overlap * 20)
-            if score > best_score:
-                best = (cpe_id, hostname, score)
-                best_score = score
-    return best
+            results.append((cpe_id, hostname, min(85, overlap * 20)))
+            seen.add(cpe_id)
+    return sorted(results, key=lambda x: -x[2])[:5]
 
 
 def build_evidence(
@@ -5072,23 +5093,12 @@ def build_publication_views(con: sqlite3.Connection) -> None:
         strong_evidence_count = evidence_stats[service_id]["strong"]
         evidence_count = evidence_stats[service_id]["count"]
 
+        # Pipeline ne decide plus : tous les services passent en review_required.
+        # Seul l'agent peut valider via agent_resolutions.
         match_state = "review_required"
-        if nature_service == "Lan To Lan":
-            if best_network_score >= 95 and (endpoint_z_score >= 60 or final_party_row):
-                match_state = "auto_valid"
-            elif best_network_score < 72:
-                match_state = "review_required"
-        elif nature_service in {"IRU FON", "Location FON"}:
-            if best_optical_score >= 95 and (endpoint_a_score >= 60 or endpoint_z_score >= 60):
-                match_state = "auto_valid"
-        elif nature_service == "Hebergement":
-            if max(endpoint_a_score, endpoint_z_score) >= 90:
-                match_state = "auto_valid"
 
         confidence_score = max(best_optical_score, best_network_score, endpoint_a_score, endpoint_z_score)
-        if match_state == "auto_valid" and strong_evidence_count >= 2:
-            confidence_band = "high"
-        elif confidence_score >= 80:
+        if confidence_score >= 80:
             confidence_band = "medium"
         else:
             confidence_band = "low"
