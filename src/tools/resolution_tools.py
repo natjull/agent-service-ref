@@ -455,7 +455,8 @@ async def list_resolutions(args: dict[str, Any]) -> dict[str, Any]:
         query = """
             SELECT r.resolution_id, r.service_id, r.confidence, r.status,
                    r.evidence_count, r.justification,
-                   s.principal_client, s.nature_service
+                   s.principal_client, s.nature_service,
+                   r.network_vlan_id, r.route_ref
             FROM agent_resolutions r
             JOIN service_master_active s ON s.service_id = r.service_id
             WHERE 1=1
@@ -480,14 +481,15 @@ async def list_resolutions(args: dict[str, Any]) -> dict[str, Any]:
             return _text("No resolutions found matching filters.")
 
         lines = [
-            "service_id | client | nature | confidence | status | evidences",
-            "--- | --- | --- | --- | --- | ---",
+            "service_id | client | nature | confidence | status | evidences | vlan | route_ref",
+            "--- | --- | --- | --- | --- | --- | --- | ---",
         ]
         for row in rows:
             lines.append(
                 f"{row['service_id']} | {row['principal_client']} | "
                 f"{row['nature_service']} | {row['confidence']} | "
-                f"{row['status']} | {row['evidence_count']}"
+                f"{row['status']} | {row['evidence_count']} | "
+                f"{row['network_vlan_id'] or '-'} | {row['route_ref'] or '-'}"
             )
 
         return _text(f"**{len(rows)} resolutions**\n\n" + "\n".join(lines))
