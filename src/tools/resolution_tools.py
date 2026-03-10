@@ -47,7 +47,9 @@ CREATE TABLE IF NOT EXISTS agent_resolutions (
     inferred_vlans_json TEXT,
     justification TEXT NOT NULL,
     status TEXT DEFAULT 'proposed',
-    evidence_count INTEGER DEFAULT 0
+    evidence_count INTEGER DEFAULT 0,
+    resolution_status TEXT DEFAULT 'validated',
+    data_gap_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS agent_evidence (
@@ -82,6 +84,8 @@ _AGENT_RESOLUTION_COLUMNS = {
     "cpe_id": "TEXT",
     "config_id": "TEXT",
     "inferred_vlans_json": "TEXT",
+    "resolution_status": "TEXT",
+    "data_gap_reason": "TEXT",
 }
 
 
@@ -424,19 +428,164 @@ async def validate_resolution(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "submit_and_validate",
-    "Soumet puis valide immediatement une resolution pour un service. "
-    "Si la soumission echoue, la validation n'est pas lancee.",
+    "Soumet puis valide immediatement une resolution ABOUTIE pour un service. "
+    "INTERDIT si l'attribut cible est absent : "
+    "L2L requiert network_vlan_id ET route_ref ; FON requiert route_ref. "
+    "Si l'attribut cible est introuvable, utiliser submit_declared_gap a la place.",
     {"service_id": str, "resolution_json": str},
 )
 async def submit_and_validate(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    resolution_raw = args.get("resolution_json", "").strip()
+
+    # Guard: parse resolution to check target attributes before submitting
+    try:
+        resolution = json.loads(resolution_raw) if resolution_raw else {}
+    except json.JSONDecodeError:
+        resolution = {}
+
+    if service_id and resolution:
+        con_check = None
+        try:
+            con_check = _connect()
+            svc = con_check.execute(
+                "SELECT nature_service FROM service_master_active WHERE service_id = ?",
+                (service_id,),
+            ).fetchone()
+            if svc:
+                nature = (svc["nature_service"] or "").strip()
+                missing = []
+                if nature == "Lan To Lan":
+                    if not resolution.get("network_vlan_id"):
+                        missing.append("network_vlan_id")
+                    if not resolution.get("route_ref"):
+                        missing.append("route_ref")
+                elif nature in ("IRU FON", "Location FON"):
+                    if not resolution.get("route_ref"):
+                        missing.append("route_ref")
+                if missing:
+                    return _text(
+                        f"BLOCKED: attribut(s) cible(s) manquant(s) pour {nature}: "
+                        f"{', '.join(missing)}.\n"
+                        "Utilise submit_declared_gap si le diagnostic est complet, "
+                        "ou continue l'enquete si des pistes restent a explorer."
+                    )
+        except Exception:
+            pass
+        finally:
+            if con_check:
+                con_check.close()
+
     submit_result = await submit_resolution.handler(args)
     submit_text = submit_result["content"][0]["text"]
     if "ERROR:" in submit_text:
         return submit_result
 
-    validate_result = await validate_resolution.handler({"service_id": args.get("service_id", "")})
+    validate_result = await validate_resolution.handler({"service_id": service_id or args.get("service_id", "")})
     validate_text = validate_result["content"][0]["text"]
     return _text(f"{submit_text}\n\n---\n\n{validate_text}")
+
+
+@tool(
+    "submit_declared_gap",
+    "Soumet un diagnostic d'echec structure pour un service dont l'attribut cible "
+    "ne peut pas etre trouve avec les donnees actuellement disponibles. "
+    "missing_attribute : 'network_vlan_id' | 'route_ref' | 'both'. "
+    "searched_sources : liste des tables consultees (ex: ['ref_network_vlans', 'ref_co_subinterface']). "
+    "observed_gap_type : 'label_absent' | 'site_code_unlinked' | 'toip_not_in_xconnect' | "
+    "'no_lease_at_site' | 'gdb_site_out_of_scope' | 'data_not_loaded'. "
+    "next_best_hint : ce qui permettrait de conclure si la donnee etait disponible. "
+    "justification : explication narrative du diagnostic.",
+    {
+        "service_id": str,
+        "missing_attribute": str,
+        "searched_sources": list,
+        "observed_gap_type": str,
+        "next_best_hint": str,
+        "justification": str,
+    },
+)
+async def submit_declared_gap(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = (args.get("service_id") or "").strip()
+    missing_attribute = (args.get("missing_attribute") or "").strip()
+    searched_sources = args.get("searched_sources") or []
+    observed_gap_type = (args.get("observed_gap_type") or "").strip()
+    next_best_hint = (args.get("next_best_hint") or "").strip()
+    justification = (args.get("justification") or "").strip()
+
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+    if not missing_attribute:
+        return _text("ERROR: missing_attribute required (network_vlan_id | route_ref | both).")
+    if not justification:
+        return _text("ERROR: justification required.")
+
+    valid_attributes = {"network_vlan_id", "route_ref", "both"}
+    if missing_attribute not in valid_attributes:
+        return _text(
+            f"ERROR: missing_attribute must be one of {sorted(valid_attributes)}, got '{missing_attribute}'."
+        )
+
+    valid_gap_types = {
+        "label_absent", "site_code_unlinked", "toip_not_in_xconnect",
+        "no_lease_at_site", "gdb_site_out_of_scope", "data_not_loaded",
+    }
+    if observed_gap_type and observed_gap_type not in valid_gap_types:
+        return _text(
+            f"ERROR: observed_gap_type must be one of {sorted(valid_gap_types)}, got '{observed_gap_type}'."
+        )
+
+    if _db_path is not None:
+        ensure_agent_tables(_db_path)
+
+    con = _connect()
+    try:
+        svc = con.execute(
+            "SELECT service_id, nature_service FROM service_master_active WHERE service_id = ?",
+            (service_id,),
+        ).fetchone()
+        if not svc:
+            return _text(f"ERROR: service_id '{service_id}' not found in service_master_active.")
+
+        gap_payload = {
+            "missing_attribute": missing_attribute,
+            "searched_sources": searched_sources if isinstance(searched_sources, list) else list(searched_sources),
+            "observed_gap_type": observed_gap_type or None,
+            "next_best_hint": next_best_hint or None,
+        }
+
+        resolution_id = _safe_hash([service_id, "declared_gap", datetime.now().isoformat()])
+
+        con.execute(
+            """INSERT OR REPLACE INTO agent_resolutions
+            (resolution_id, service_id, confidence,
+             justification, status, evidence_count,
+             resolution_status, data_gap_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                resolution_id,
+                service_id,
+                "low",
+                justification,
+                "proposed",
+                0,
+                "declared_gap",
+                json.dumps(gap_payload, ensure_ascii=True),
+            ),
+        )
+        con.commit()
+        return _text(
+            f"Declared gap submitted: {resolution_id}\n"
+            f"- service: {service_id} ({svc['nature_service']})\n"
+            f"- missing_attribute: {missing_attribute}\n"
+            f"- observed_gap_type: {observed_gap_type or 'not specified'}\n"
+            f"- resolution_status: declared_gap\n"
+            f"- next_best_hint: {next_best_hint or 'none'}"
+        )
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
 
 
 @tool(

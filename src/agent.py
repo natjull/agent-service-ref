@@ -55,11 +55,15 @@ from .tools.db_tools import (
     resolve_optical_candidates,
     resolve_party_candidates,
     resolve_spatial_candidates,
+    hunt_vlan,
+    hunt_route,
+    get_co_cluster,
 )
 from .tools.config_tools import search_configs, read_config_file
 from .tools.resolution_tools import (
     submit_resolution,
     submit_and_validate,
+    submit_declared_gap,
     validate_resolution,
     list_resolutions,
 )
@@ -85,12 +89,17 @@ def create_service_ref_server():
             resolve_network_candidates,
             resolve_party_candidates,
             resolve_spatial_candidates,
+            # Hunt tools (chasse attributs cibles)
+            hunt_vlan,
+            hunt_route,
+            get_co_cluster,
             # Config tools
             search_configs,
             read_config_file,
             # Resolution tools
             submit_resolution,
             submit_and_validate,
+            submit_declared_gap,
             validate_resolution,
             list_resolutions,
             # Scoring tools

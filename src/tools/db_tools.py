@@ -568,6 +568,7 @@ def _resolve_network_candidates(con: sqlite3.Connection, service_id: str) -> dic
             seen_subif.add(r["subif_id"])
 
     # 4b. Par circuit_id depuis signals LEA (route_refs_json)
+    # Fix: xconnect_circuit_id stocke uniquement le numero (ex: "2079"), pas le prefixe "TOIP "
     if len(co_subinterfaces) < 15:
         circuit_ids: set[str] = set()
         for sig in con.execute(
@@ -577,7 +578,11 @@ def _resolve_network_candidates(con: sqlite3.Connection, service_id: str) -> dic
             try:
                 for ref in json.loads(sig["route_refs_json"]):
                     if ref and len(ref) >= 4:
-                        circuit_ids.add(ref.strip())
+                        raw = ref.strip()
+                        # Strip "TOIP " prefix so "TOIP 2079" matches xconnect_circuit_id="2079"
+                        numeric = raw.upper().removeprefix("TOIP ").strip()
+                        circuit_ids.add(numeric)
+                        circuit_ids.add(raw)  # also try exact match as fallback
             except (json.JSONDecodeError, TypeError):
                 pass
         for cid in circuit_ids:
@@ -1010,6 +1015,523 @@ async def resolve_party_candidates(args: dict[str, Any]) -> dict[str, Any]:
     try:
         payload = _resolve_party_candidates(con, service_id)
         return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------------------
+# Hunt tools — chasse aux attributs cibles (route_ref + network_vlan_id)
+# ---------------------------------------------------------------------------
+
+# Mapping transitoire CO prefix → nom de ville (sera remplace par ref_co_site_crosswalk)
+# Ne pas traiter comme verite absolue — certains CO couvrent plusieurs villes
+_CO_PREFIX_MAP: dict[str, str] = {
+    "COMPIEGNE": "COM1",
+    "CREIL": "CRL1",
+    "BEAUVAIS": "BEA1",
+    "AMIENS": "AMI3",
+}
+
+
+def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+    """Chasse au VLAN pour un service L2L — retourne des hypotheses avec preuves."""
+    svc = con.execute(
+        """SELECT s.service_id, s.nature_service, s.client_final, s.endpoint_a_raw, s.endpoint_z_raw,
+                  e_a.matched_site_id AS site_a_id, e_a.matched_site_name AS site_a_name,
+                  e_z.matched_site_id AS site_z_id, e_z.matched_site_name AS site_z_name
+           FROM service_master_active s
+           LEFT JOIN service_endpoint e_a ON e_a.service_id = s.service_id AND e_a.endpoint_label = 'A'
+           LEFT JOIN service_endpoint e_z ON e_z.service_id = s.service_id AND e_z.endpoint_label = 'Z'
+           WHERE s.service_id = ?""",
+        (service_id,),
+    ).fetchone()
+    if not svc:
+        return {"error": f"service_id '{service_id}' not found"}
+
+    hypotheses: list[dict[str, Any]] = []
+    data_explored: list[str] = []
+    seen_vlans: set[str] = set()
+
+    # --- Source 1 : ancre TOIP via xconnect_circuit_id [strong] ---
+    # route_refs_json contient "TOIP 2079" → xconnect_circuit_id stocke "2079"
+    data_explored.append("service_lea_signal.route_refs_json → ref_co_subinterface.xconnect_circuit_id")
+    toip_refs: list[str] = []
+    for sig in con.execute(
+        "SELECT route_refs_json FROM service_lea_signal WHERE service_id = ? AND route_refs_json IS NOT NULL",
+        (service_id,),
+    ).fetchall():
+        try:
+            for ref in json.loads(sig["route_refs_json"]):
+                if ref:
+                    toip_refs.append(ref.strip())
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    for raw_ref in toip_refs:
+        numeric = raw_ref.upper().removeprefix("TOIP ").strip()
+        for cid in {numeric, raw_ref}:
+            for r in con.execute(
+                "SELECT cs.subif_id, cs.device_name, cs.interface_name, cs.vlan_id, "
+                "cs.description, cs.site_code, cs.xconnect_circuit_id, "
+                "nv.network_vlan_id, nv.label AS sw_label "
+                "FROM ref_co_subinterface cs "
+                "LEFT JOIN ref_network_vlans nv ON nv.vlan_id = cs.vlan_id "
+                "   AND nv.device_name LIKE REPLACE(SUBSTR(cs.device_name,1,4)||'-SW-%','','')"
+                " WHERE cs.xconnect_circuit_id = ?",
+                (cid,),
+            ).fetchall():
+                vlan_key = str(r["vlan_id"])
+                if vlan_key in seen_vlans:
+                    continue
+                seen_vlans.add(vlan_key)
+                ev_for = [
+                    f"xconnect_circuit_id={r['xconnect_circuit_id']} sur {r['device_name']} {r['interface_name']}",
+                    f"LEA route_ref: {raw_ref}",
+                ]
+                if r["site_code"]:
+                    ev_for.append(f"site_code={r['site_code']}")
+                ev_against = []
+                if not r["sw_label"]:
+                    ev_against.append(f"label client absent dans ref_network_vlans pour vlan_id={r['vlan_id']}")
+                hypotheses.append({
+                    "candidate_vlan_id": vlan_key,
+                    "candidate_device": r["device_name"],
+                    "source": "toip_xconnect",
+                    "network_vlan_id": r["network_vlan_id"],
+                    "evidence_for": ev_for,
+                    "evidence_against": ev_against,
+                    "proof_level": "strong" if not ev_against else "medium",
+                    "co_interface": r["interface_name"],
+                    "site_code": r["site_code"],
+                    "sw_label": r["sw_label"],
+                })
+
+    # --- Source 2 : labels client dans ref_network_vlans [medium] ---
+    data_explored.append("ref_network_vlans (normalized_label LIKE client tokens)")
+    _NOISE = {"SAINT", "ROUTE", "AVENUE", "FRANCE", "AGENCE", "COMPLETEL", "ADISTA",
+               "HEXANET", "TELOISE", "TELECOM", "CLIENT", "RESEAU"}
+    client_tokens: list[str] = []
+    for field in (svc["client_final"], svc["endpoint_z_raw"]):
+        if field:
+            for tok in re.split(r"[^A-Za-z0-9]+", field.upper()):
+                if len(tok) >= 5 and tok not in _NOISE and tok not in client_tokens:
+                    client_tokens.append(tok)
+
+    for tok in client_tokens[:5]:
+        for r in con.execute(
+            "SELECT network_vlan_id, device_name, vlan_id, label, route_refs_json "
+            "FROM ref_network_vlans WHERE UPPER(normalized_label) LIKE ? LIMIT 10",
+            (f"%{tok}%",),
+        ).fetchall():
+            vlan_key = str(r["vlan_id"])
+            if vlan_key in seen_vlans:
+                continue
+            seen_vlans.add(vlan_key)
+            ev_for = [f"label '{r['label']}' contient token client '{tok}'"]
+            ev_against: list[str] = []
+            # Check if VREG_ (pool, not assigned)
+            if (r["label"] or "").upper().startswith("VREG"):
+                ev_against.append(f"label VREG_ = ressource pool non nominalisee")
+            hypotheses.append({
+                "candidate_vlan_id": vlan_key,
+                "candidate_device": r["device_name"],
+                "source": "label_match",
+                "network_vlan_id": r["network_vlan_id"],
+                "evidence_for": ev_for,
+                "evidence_against": ev_against,
+                "proof_level": "weak" if ev_against else "medium",
+                "label": r["label"],
+            })
+
+    # --- Source 3 : sub-interfaces CO du site_a (xconnect present = circuit reel) [medium] ---
+    # Deduire le prefixe CO depuis matched_site_name du POP A (transitoire)
+    co_context: dict[str, Any] = {}
+    site_a_name = (svc["site_a_name"] or "").upper()
+    co_prefix: str | None = None
+    for city, prefix in _CO_PREFIX_MAP.items():
+        if city in site_a_name:
+            co_prefix = prefix
+            break
+
+    if co_prefix:
+        data_explored.append(f"ref_co_subinterface WHERE device_name LIKE '{co_prefix}-CO-%'")
+        active_co = con.execute(
+            "SELECT subif_id, device_name, interface_name, vlan_id, description, "
+            "site_code, xconnect_circuit_id "
+            "FROM ref_co_subinterface "
+            "WHERE device_name LIKE ? AND xconnect_circuit_id IS NOT NULL "
+            "ORDER BY vlan_id LIMIT 50",
+            (f"{co_prefix}-CO-%",),
+        ).fetchall()
+        co_context = {
+            "co_prefix": co_prefix,
+            "active_circuits_count": len(active_co),
+            "sample": [_row_to_dict(r) for r in active_co[:10]],
+        }
+        # Cross-ref: VLANs from source 2 that appear in CO context
+        active_vlans = {str(r["vlan_id"]) for r in active_co}
+        for hyp in hypotheses:
+            if hyp["candidate_vlan_id"] in active_vlans and hyp["source"] == "label_match":
+                hyp["evidence_for"].append(
+                    f"vlan_id confirme actif sur {co_prefix}-CO (xconnect present)"
+                )
+                hyp["proof_level"] = "medium"
+
+    # --- Source 4 : CPE hostname → port access → VLAN [strong si CPE+port+vlan] ---
+    data_explored.append("ref_cpe_inventory + service_support_reseau.cpe_id")
+    cpe_rows = con.execute(
+        """SELECT cpe_id, hostname FROM ref_cpe_inventory
+           WHERE cpe_id IN (
+               SELECT cpe_id FROM service_support_reseau WHERE service_id = ? AND cpe_id IS NOT NULL
+           )""",
+        (service_id,),
+    ).fetchall()
+    if cpe_rows:
+        for cpe in cpe_rows:
+            co_context.setdefault("cpe_hints", []).append({
+                "cpe_id": cpe["cpe_id"],
+                "hostname": cpe["hostname"],
+            })
+
+    # Sort hypotheses: strong first
+    _LEVEL_ORDER = {"strong": 0, "medium": 1, "weak": 2, "context_only": 3}
+    hypotheses.sort(key=lambda h: _LEVEL_ORDER.get(h.get("proof_level", "weak"), 2))
+
+    return {
+        "service_id": service_id,
+        "nature_service": svc["nature_service"],
+        "site_a": svc["site_a_name"],
+        "site_z": svc["site_z_name"],
+        "co_prefix_used": co_prefix,
+        "hypotheses": hypotheses,
+        "co_context": co_context,
+        "data_explored": data_explored,
+        "summary": (
+            f"{len(hypotheses)} hypothese(s) VLAN : "
+            f"{sum(1 for h in hypotheses if h['proof_level']=='strong')} strong, "
+            f"{sum(1 for h in hypotheses if h['proof_level']=='medium')} medium, "
+            f"{sum(1 for h in hypotheses if h['proof_level']=='weak')} weak"
+            if hypotheses else "Aucune hypothese VLAN trouvee"
+        ),
+    }
+
+
+def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+    """Chasse a la route optique — separe evidence directe vs contexte seul."""
+    svc = con.execute(
+        """SELECT s.service_id, s.nature_service, s.client_final, s.ref_external,
+                  e_a.matched_site_id AS site_a_id, e_a.matched_site_name AS site_a_name,
+                  e_z.matched_site_id AS site_z_id, e_z.matched_site_name AS site_z_name
+           FROM service_master_active s
+           LEFT JOIN service_endpoint e_a ON e_a.service_id = s.service_id AND e_a.endpoint_label = 'A'
+           LEFT JOIN service_endpoint e_z ON e_z.service_id = s.service_id AND e_z.endpoint_label = 'Z'
+           WHERE s.service_id = ?""",
+        (service_id,),
+    ).fetchone()
+    if not svc:
+        return {"error": f"service_id '{service_id}' not found"}
+
+    direct_evidence: list[dict[str, Any]] = []
+    context_only: list[dict[str, Any]] = []
+    data_explored: list[str] = []
+    seen_routes: set[str] = set()
+
+    # --- Source 1 : ref_external → ref_optical_lease.ref_exploit [strong] ---
+    ref_external = (svc["ref_external"] or "").strip()
+    data_explored.append("ref_optical_lease.ref_exploit (match exact sur ref_external)")
+    if ref_external:
+        for r in con.execute(
+            "SELECT optical_lease_id, ref_exploit, lease_kind "
+            "FROM ref_optical_lease WHERE ref_exploit = ? LIMIT 5",
+            (ref_external,),
+        ).fetchall():
+            rr = (r["ref_exploit"] or "").strip()
+            if rr and rr not in seen_routes:
+                seen_routes.add(rr)
+                direct_evidence.append({
+                    "candidate_route_ref": rr,
+                    "candidate_lease_id": r["optical_lease_id"],
+                    "proof_level": "strong",
+                    "evidence_for": [f"ref_external '{ref_external}' = ref_exploit dans ref_optical_lease"],
+                    "evidence_against": [],
+                    "source": "ref_exploit_exact",
+                })
+
+    # --- Source 2 : route_refs_json (TOIP) → ref_optical_lease.ref_exploit [strong] ---
+    toip_refs: list[str] = []
+    for sig in con.execute(
+        "SELECT route_refs_json FROM service_lea_signal WHERE service_id = ? AND route_refs_json IS NOT NULL",
+        (service_id,),
+    ).fetchall():
+        try:
+            for ref in json.loads(sig["route_refs_json"]):
+                if ref:
+                    toip_refs.append(ref.strip())
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    for raw_ref in toip_refs:
+        data_explored.append(f"ref_optical_lease.ref_exploit LIKE '%{raw_ref}%'")
+        # Try exact match and LIKE match for flexibility
+        for r in con.execute(
+            "SELECT optical_lease_id, ref_exploit, lease_kind "
+            "FROM ref_optical_lease WHERE ref_exploit LIKE ? LIMIT 5",
+            (f"%{raw_ref}%",),
+        ).fetchall():
+            rr = (r["ref_exploit"] or "").strip()
+            if rr and rr not in seen_routes:
+                seen_routes.add(rr)
+                direct_evidence.append({
+                    "candidate_route_ref": rr,
+                    "candidate_lease_id": r["optical_lease_id"],
+                    "proof_level": "strong",
+                    "evidence_for": [
+                        f"LEA route_ref '{raw_ref}' matche ref_exploit '{rr}' dans ref_optical_lease",
+                    ],
+                    "evidence_against": [],
+                    "source": "toip_lease",
+                })
+
+    # --- Source 3 : endpoints A et Z dans ref_optical_lease_endpoint [strong/medium] ---
+    has_lease_ep = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ref_optical_lease_endpoint'"
+    ).fetchone()
+    site_ids = [sid for sid in (svc["site_a_id"], svc["site_z_id"]) if sid]
+    if has_lease_ep and site_ids:
+        data_explored.append("ref_optical_lease_endpoint WHERE site_id IN (site_a, site_z)")
+        lease_ep_rows = con.execute(
+            f"""SELECT ole.optical_lease_id, ole.ref_exploit, ole.lease_kind,
+                       GROUP_CONCAT(ep.endpoint_label) as endpoints,
+                       GROUP_CONCAT(ep.site_id) as site_ids
+                FROM ref_optical_lease ole
+                JOIN ref_optical_lease_endpoint ep ON ep.optical_lease_id = ole.optical_lease_id
+                WHERE ep.site_id IN ({','.join('?' for _ in site_ids)})
+                GROUP BY ole.optical_lease_id
+                ORDER BY ole.ref_exploit
+                LIMIT 10""",
+            site_ids,
+        ).fetchall()
+        for r in lease_ep_rows:
+            rr = (r["ref_exploit"] or "").strip()
+            if not rr or rr in seen_routes:
+                continue
+            seen_routes.add(rr)
+            found_sites = set((r["site_ids"] or "").split(","))
+            both_ends = svc["site_a_id"] in found_sites and svc["site_z_id"] in found_sites
+            direct_evidence.append({
+                "candidate_route_ref": rr,
+                "candidate_lease_id": r["optical_lease_id"],
+                "proof_level": "strong" if both_ends else "medium",
+                "evidence_for": [
+                    f"lease {r['optical_lease_id']} a des endpoints aux sites {r['site_ids']}",
+                    "les deux bouts confirmes" if both_ends else "un seul bout confirme",
+                ],
+                "evidence_against": [] if both_ends else ["site Z non confirme par endpoint"],
+                "source": "lease_endpoint",
+            })
+
+    # --- Source 4 : ref_route_parcours via site_z token [medium] ---
+    has_parcours = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ref_route_parcours'"
+    ).fetchone()
+    site_z_name = (svc["site_z_name"] or "").upper()
+    site_tokens: list[str] = []
+    _EXCLUDE_TOKENS = {"SITE", "POP", "NRA", "TELOISE", "FRANCE", "NORD", "SUD", "EST", "OUEST",
+                       "SAINT", "COMMUNE", "VILLE", "MAIRIE", "AGENCE", "HOTEL"}
+    for tok in re.split(r"[^A-Z0-9]+", site_z_name):
+        if len(tok) >= 4 and tok not in _EXCLUDE_TOKENS:
+            site_tokens.append(tok)
+
+    if has_parcours and site_tokens:
+        data_explored.append(f"ref_route_parcours WHERE site LIKE '%{site_tokens[0]}%'")
+        seen_parcours_routes: set[str] = set()
+        for tok in site_tokens[:3]:
+            for r in con.execute(
+                "SELECT route_ref, step_type, site, bpe, cable_in, cable_out "
+                "FROM ref_route_parcours WHERE UPPER(site) LIKE ? "
+                "ORDER BY route_ref LIMIT 10",
+                (f"%{tok}%",),
+            ).fetchall():
+                rr = (r["route_ref"] or "").strip()
+                if rr and rr not in seen_routes and rr not in seen_parcours_routes:
+                    seen_parcours_routes.add(rr)
+                    context_only.append({
+                        "candidate_route_ref": rr,
+                        "source": "parcours_site_z",
+                        "evidence_for": [f"route passe par site token '{tok}' (site_z={svc['site_z_name']})"],
+                        "evidence_against": ["parcours seul insuffisant — pas de lien direct au service"],
+                        "note": "contexte uniquement — ne prouve pas le lien au service",
+                    })
+
+    # --- Source 5 : housing + cables au site Z [contexte] ---
+    has_housing = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ref_optical_housing'"
+    ).fetchone()
+    if has_housing and site_tokens:
+        data_explored.append("ref_optical_housing + ref_optical_cable (contexte topo passive site Z)")
+        for tok in site_tokens[:2]:
+            for r in con.execute(
+                "SELECT housing_id, housing_type, reference, description, site_id, site_name "
+                "FROM ref_optical_housing WHERE UPPER(site_name) LIKE ? LIMIT 5",
+                (f"%{tok}%",),
+            ).fetchall():
+                context_only.append({
+                    "type": "housing",
+                    "housing_id": r["housing_id"],
+                    "reference": r["reference"],
+                    "site_name": r["site_name"],
+                    "source": "housing_site_z",
+                    "note": "contexte topo passive — utile pour identifier cables mais pas preuve seule",
+                })
+
+    return {
+        "service_id": service_id,
+        "nature_service": svc["nature_service"],
+        "site_a": svc["site_a_name"],
+        "site_z": svc["site_z_name"],
+        "ref_external": ref_external or None,
+        "toip_refs_in_lea": toip_refs,
+        "direct_evidence": direct_evidence,
+        "context_only": context_only,
+        "data_explored": data_explored,
+        "summary": (
+            f"{len(direct_evidence)} evidence(s) directe(s) : "
+            f"{sum(1 for e in direct_evidence if e['proof_level']=='strong')} strong, "
+            f"{sum(1 for e in direct_evidence if e['proof_level']=='medium')} medium. "
+            f"{len(context_only)} element(s) contexte seul."
+            if direct_evidence else
+            f"Aucune evidence directe. {len(context_only)} element(s) contexte seul."
+        ),
+    }
+
+
+@tool(
+    "hunt_vlan",
+    "Chasse au VLAN pour un service L2L. "
+    "Retourne des hypotheses de VLAN avec evidence_for, evidence_against et proof_level. "
+    "Sources explorees (ordre de fiabilite) : "
+    "(1) ancre TOIP via xconnect_circuit_id [strong], "
+    "(2) labels client dans ref_network_vlans [medium], "
+    "(3) sub-interfaces CO actives du POP A [medium si coherent], "
+    "(4) CPE hostname depuis service_support_reseau [strong si CPE+port+vlan]. "
+    "Point de depart recommande pour tout service L2L sans network_vlan_id.",
+    {"service_id": str},
+)
+async def hunt_vlan(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _hunt_vlan(con, service_id)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "hunt_route",
+    "Chasse a la route optique pour un service L2L ou FON. "
+    "Separe evidence directe (preuve suffisante) et contexte seul (non suffisant). "
+    "Sources directes : ref_exploit exact sur ref_external, TOIP dans ref_optical_lease, "
+    "endpoints lease aux sites A et Z. "
+    "Sources contexte : routes voisines par parcours, housing au site Z. "
+    "Point de depart recommande pour tout service sans route_ref.",
+    {"service_id": str},
+)
+async def hunt_route(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _hunt_route(con, service_id)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "get_co_cluster",
+    "Cartographie tous les VLANs et circuits d'un CO (ex: 'COM1', 'CRL1', 'AMI3', 'BEA1'). "
+    "Distingue VLANs actifs (xconnect present = circuit reel confirme) "
+    "vs VLANs pool (xconnect NULL, souvent VREG_* = ressources non affectees). "
+    "Utile pour raisonner par cohorte : identifier les VLANs libres ou parmi les circuits "
+    "actifs lesquels correspondent a des services clients connus. "
+    "IMPORTANT : xconnect present = signal fort, xconnect absent != preuve que c'est un pool.",
+    {"location_prefix": str},
+)
+async def get_co_cluster(args: dict[str, Any]) -> dict[str, Any]:
+    location_prefix = (args.get("location_prefix") or "").strip().upper()
+    if not location_prefix:
+        return _text("ERROR: No location_prefix provided (ex: 'COM1', 'CRL1', 'AMI3', 'BEA1').")
+
+    con = _connect(read_only=True)
+    try:
+        # SW prefix: COM1-CO-* → COM1-SW-*
+        sw_prefix = location_prefix.replace("-CO-", "-SW-")
+        if sw_prefix == location_prefix:
+            sw_prefix = location_prefix  # no -CO- in name, use as-is
+
+        all_subifs = con.execute(
+            """SELECT cs.subif_id, cs.device_name, cs.interface_name, cs.vlan_id,
+                      cs.description, cs.site_code, cs.xconnect_ip, cs.xconnect_circuit_id,
+                      nv.network_vlan_id, nv.label AS sw_label, nv.device_name AS sw_device
+               FROM ref_co_subinterface cs
+               LEFT JOIN ref_network_vlans nv ON nv.vlan_id = cs.vlan_id
+                  AND nv.device_name LIKE ?
+               WHERE cs.device_name LIKE ?
+               ORDER BY cs.device_name, cs.vlan_id""",
+            (f"{sw_prefix}%", f"{location_prefix}-CO-%"),
+        ).fetchall()
+
+        devices: list[str] = []
+        active_circuits: list[dict[str, Any]] = []
+        pool_vlans: list[dict[str, Any]] = []
+        toip_circuits: list[dict[str, Any]] = []
+
+        seen_devs: set[str] = set()
+        for r in all_subifs:
+            dev = r["device_name"]
+            if dev not in seen_devs:
+                devices.append(dev)
+                seen_devs.add(dev)
+
+            row_dict = _row_to_dict(r)
+            xconn = r["xconnect_circuit_id"]
+            if xconn:
+                active_circuits.append(row_dict)
+                # TOIP circuits: xconnect numerique
+                if str(xconn).isdigit():
+                    toip_circuits.append(row_dict)
+            else:
+                pool_vlans.append(row_dict)
+
+        return _text(json.dumps({
+            "location_prefix": location_prefix,
+            "sw_prefix_used": sw_prefix,
+            "devices": devices,
+            "total_subifs": len(all_subifs),
+            "active_circuits_count": len(active_circuits),
+            "pool_vlans_count": len(pool_vlans),
+            "toip_circuits_count": len(toip_circuits),
+            "active_circuits": active_circuits[:50],
+            "pool_vlans": pool_vlans[:20],
+            "toip_circuits": toip_circuits[:30],
+            "note": (
+                "active_circuits = xconnect_circuit_id non null (circuit reel confirme). "
+                "pool_vlans = xconnect null (potentiellement libre mais non prouve). "
+                "toip_circuits = xconnect numerique uniquement (candidats TOIP)."
+            ),
+        }, indent=2, ensure_ascii=False, default=str))
     except Exception as e:
         return _text(f"ERROR: {e}")
     finally:
