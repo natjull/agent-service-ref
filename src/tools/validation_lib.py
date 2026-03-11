@@ -22,10 +22,31 @@ class ValidationResult:
 # ---------------------------------------------------------------------------
 
 _BUSINESS_STOPWORDS = {
-    "CLIENT", "CLIENTS", "LAN2LAN", "L2L", "TRUNK", "VERS", "CPE", "DSP",
-    "VLAN", "POP", "SITE", "PORT", "ACCES", "ACCESS", "TRANSPORT", "COLLECTE",
-    "SERVICE", "SERVICES", "SHUT", "TEMPORAIRE", "NE", "PAS", "CPEDSP",
-    "CLIENTLAN2LAN", "CLIENTL2L",
+    "CLIENT",
+    "CLIENTS",
+    "LAN2LAN",
+    "L2L",
+    "TRUNK",
+    "VERS",
+    "CPE",
+    "DSP",
+    "VLAN",
+    "POP",
+    "SITE",
+    "PORT",
+    "ACCES",
+    "ACCESS",
+    "TRANSPORT",
+    "COLLECTE",
+    "SERVICE",
+    "SERVICES",
+    "SHUT",
+    "TEMPORAIRE",
+    "NE",
+    "PAS",
+    "CPEDSP",
+    "CLIENTLAN2LAN",
+    "CLIENTL2L",
 }
 
 
@@ -196,7 +217,7 @@ def validate_device_pop(
 def validate_route_endpoints(
     con: sqlite3.Connection, route_ref: str, site_a: str, site_z: str
 ) -> ValidationResult:
-    """Check that route passes through site_a and site_z via ref_route_parcours."""
+    """Check that route matches terminal/passage sites via parcours data."""
     if not route_ref:
         return ValidationResult(passed=False, detail="empty route_ref", score=0)
 
@@ -215,7 +236,10 @@ def validate_route_endpoints(
 
     route_id = route["route_id"]
 
-    # Check ref_route_parcours exists
+    # Check parcours view/table exists
+    has_view = con.execute(
+        "SELECT name FROM sqlite_master WHERE name='v_route_endpoint_sites' AND type='view'"
+    ).fetchone()
     has_table = con.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='ref_route_parcours'"
     ).fetchone()
@@ -226,9 +250,16 @@ def validate_route_endpoints(
             score=60,
         )
 
-    # Get route stops
+    terminal_stops = (
+        con.execute(
+            "SELECT site_label AS site, step_type FROM v_route_endpoint_sites WHERE route_id = ? ORDER BY step_no",
+            (route_id,),
+        ).fetchall()
+        if has_view
+        else []
+    )
     stops = con.execute(
-        "SELECT site, step_type FROM ref_route_parcours WHERE route_id = ? ORDER BY rowid",
+        "SELECT site, step_type FROM ref_route_parcours WHERE route_id = ? ORDER BY step_no, rowid",
         (route_id,),
     ).fetchall()
 
@@ -239,32 +270,60 @@ def validate_route_endpoints(
             score=60,
         )
 
-    stop_sites = [s["site"] for s in stops]
-    stop_sites_upper = [s.upper() for s in stop_sites if s]
+    def _has_match(site_val: str, rows: list[sqlite3.Row]) -> bool:
+        candidate = _norm_text(site_val)
+        if not candidate:
+            return False
+        for row in rows:
+            current = _norm_text(row["site"])
+            if current and (candidate in current or current in candidate):
+                return True
+        return False
 
-    matches = []
-    for label, site_val in [("site_a", site_a), ("site_z", site_z)]:
+    endpoint_matches = []
+    passage_matches = []
+    for label, site_val in (("site_a", site_a), ("site_z", site_z)):
         if not site_val:
             continue
-        site_upper = site_val.upper()
-        if any(site_upper in ss or ss in site_upper for ss in stop_sites_upper):
-            matches.append(label)
+        if _has_match(site_val, terminal_stops):
+            endpoint_matches.append(label)
+        elif _has_match(site_val, stops):
+            passage_matches.append(label)
 
-    if len(matches) == 2:
+    if len(endpoint_matches) == 2:
         return ValidationResult(
             passed=True,
-            detail=f"route '{route_ref}' passes through both site_a and site_z",
-            score=95,
+            detail=f"route '{route_ref}' has terminal endpoints matching site_a and site_z",
+            score=97,
         )
-    elif len(matches) == 1:
+    if len(endpoint_matches) == 1 and len(endpoint_matches) + len(passage_matches) == 2:
         return ValidationResult(
             passed=True,
-            detail=f"route '{route_ref}' passes through {matches[0]} only",
-            score=70,
+            detail=f"route '{route_ref}' matches one terminal endpoint and one passage site",
+            score=78,
         )
-    else:
+    if len(endpoint_matches) == 1:
         return ValidationResult(
-            passed=False,
-            detail=f"route '{route_ref}' stops ({stop_sites}) don't match site_a='{site_a}' / site_z='{site_z}'",
-            score=20,
+            passed=True,
+            detail=f"route '{route_ref}' matches terminal endpoint for {endpoint_matches[0]} only",
+            score=72,
         )
+    if len(passage_matches) == 2:
+        return ValidationResult(
+            passed=True,
+            detail=f"route '{route_ref}' passes through both site_a and site_z but without terminal confirmation",
+            score=60,
+        )
+    if len(passage_matches) == 1:
+        return ValidationResult(
+            passed=True,
+            detail=f"route '{route_ref}' passes through {passage_matches[0]} only",
+            score=45,
+        )
+
+    stop_sites = [s["site"] for s in stops]
+    return ValidationResult(
+        passed=False,
+        detail=f"route '{route_ref}' stops ({stop_sites}) don't match site_a='{site_a}' / site_z='{site_z}'",
+        score=20,
+    )

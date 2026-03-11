@@ -17,6 +17,20 @@ _ALLOWED_FIRST_WORDS = frozenset({"SELECT", "PRAGMA", "EXPLAIN", "WITH"})
 _MAX_ROWS = 100
 
 
+def _strip_leading_sql_comments(sql: str) -> str:
+    text = sql.lstrip()
+    while True:
+        if text.startswith("--"):
+            newline = text.find("\n")
+            text = "" if newline == -1 else text[newline + 1 :].lstrip()
+            continue
+        if text.startswith("/*"):
+            end = text.find("*/")
+            text = "" if end == -1 else text[end + 2 :].lstrip()
+            continue
+        return text
+
+
 def configure(db_path: Path) -> None:
     global _db_path
     _db_path = Path(db_path)
@@ -35,7 +49,7 @@ def _connect(*, read_only: bool = False) -> sqlite3.Connection:
 
 def _guard_sql(sql: str) -> str | None:
     """Return an error message if the SQL is not a read-only statement."""
-    stripped = sql.strip()
+    stripped = _strip_leading_sql_comments(sql)
     if not stripped:
         return "BLOCKED: empty query."
     first_word = stripped.split()[0].upper()
@@ -1508,6 +1522,29 @@ def _add_vlan_hypothesis(
                 existing[extra_key] = extra_value
 
 
+def _table_or_view_exists(con: sqlite3.Connection, name: str) -> bool:
+    row = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = ? AND type IN ('table', 'view')",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def _best_spatial_seed(seeds: list[sqlite3.Row]) -> dict[str, Any] | None:
+    if not seeds:
+        return None
+    ordered = sorted(
+        seeds,
+        key=lambda row: (
+            int(row["match_score"] or 0),
+            int(row["xy_discriminance_score"] or 0),
+            -int(row["same_xy_count_in_city"] or 0),
+        ),
+        reverse=True,
+    )
+    return _row_to_dict(ordered[0])
+
+
 def _build_site_anchor(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
     service = con.execute(
         """SELECT service_id, nature_service, principal_client, client_final,
@@ -1526,7 +1563,9 @@ def _build_site_anchor(con: sqlite3.Connection, service_id: str) -> dict[str, An
     ).fetchall()
     seeds = con.execute(
         """SELECT seed_type, raw_value, city_hint, postcode_hint, match_rule, match_score,
-                  x_l93, y_l93, source_table, source_column
+                  x_l93, y_l93, source_table, source_column,
+                  xy_discriminance_score, same_xy_count_in_city,
+                  is_reused_xy, is_heavily_reused_xy, xy_precision_class
            FROM service_spatial_seed
            WHERE service_id = ?
            ORDER BY seed_priority, match_score DESC
@@ -1565,32 +1604,43 @@ def _build_site_anchor(con: sqlite3.Connection, service_id: str) -> dict[str, An
         (service_id,),
     ).fetchone()
 
+    best_seed = _best_spatial_seed(seeds)
     site_assets: list[dict[str, Any]] = []
     site_ids = []
     for row in endpoints:
         if row["matched_site_id"] and row["matched_site_id"] not in site_ids:
             site_ids.append(row["matched_site_id"])
     for site_id in site_ids:
-        site_ref = con.execute(
-            "SELECT reference FROM ref_sites WHERE site_id = ?",
-            (site_id,),
-        ).fetchone()
-        housing_count = con.execute(
-            "SELECT COUNT(*) AS c FROM ref_optical_housing WHERE site_id = ?",
-            (site_id,),
-        ).fetchone()["c"]
-        lease_count = con.execute(
-            "SELECT COUNT(DISTINCT optical_lease_id) AS c FROM ref_optical_lease_endpoint WHERE site_id = ?",
-            (site_id,),
-        ).fetchone()["c"]
-        site_assets.append(
-            {
-                "site_id": site_id,
-                "site_reference": site_ref["reference"] if site_ref else None,
-                "housing_count": housing_count,
-                "lease_endpoint_count": lease_count,
-            }
-        )
+        if _table_or_view_exists(con, "v_site_passive_assets"):
+            asset_row = con.execute(
+                "SELECT * FROM v_site_passive_assets WHERE site_id = ?",
+                (site_id,),
+            ).fetchone()
+        else:
+            asset_row = None
+        if asset_row:
+            site_assets.append(_row_to_dict(asset_row) or {})
+        else:
+            site_ref = con.execute(
+                "SELECT reference FROM ref_sites WHERE site_id = ?",
+                (site_id,),
+            ).fetchone()
+            housing_count = con.execute(
+                "SELECT COUNT(*) AS c FROM ref_optical_housing WHERE site_id = ?",
+                (site_id,),
+            ).fetchone()["c"]
+            lease_count = con.execute(
+                "SELECT COUNT(DISTINCT optical_lease_id) AS c FROM ref_optical_lease_endpoint WHERE site_id = ?",
+                (site_id,),
+            ).fetchone()["c"]
+            site_assets.append(
+                {
+                    "site_id": site_id,
+                    "site_reference": site_ref["reference"] if site_ref else None,
+                    "housing_count": housing_count,
+                    "lease_endpoint_count": lease_count,
+                }
+            )
 
     matched_scores = [
         int(row["score"] or 0) for row in endpoints if row["matched_site_id"]
@@ -1606,13 +1656,20 @@ def _build_site_anchor(con: sqlite3.Connection, service_id: str) -> dict[str, An
         *(row["matched_site_name"] for row in endpoints),
     )
 
+    seed_heavily_reused = bool(
+        best_seed and int(best_seed.get("is_heavily_reused_xy") or 0)
+    )
+    seed_discriminance = (
+        int(best_seed.get("xy_discriminance_score") or 0) if best_seed else 0
+    )
+
     if route_refs:
         recommended_entry_point = "route_ref_first"
         rationale = "route_refs_json LEA present - start by validating route_ref in GDB/leases, then confirm topology"
-    elif has_distinct_pair and best_site_score >= 60:
+    elif has_distinct_pair and best_site_score >= 60 and not seed_heavily_reused:
         recommended_entry_point = "site_gdb_first"
         rationale = "distinct site anchors available - start from site GDB then passive topology"
-    elif best_site_score >= 60:
+    elif best_site_score >= 60 and not seed_heavily_reused:
         recommended_entry_point = "site_then_network"
         rationale = "single credible site anchor - start from GDB site, then use network evidence to disambiguate"
     elif (
@@ -1633,9 +1690,11 @@ def _build_site_anchor(con: sqlite3.Connection, service_id: str) -> dict[str, An
 
     site_anchor_quality = (
         "high"
-        if has_distinct_pair and best_site_score >= 70
+        if has_distinct_pair and best_site_score >= 70 and not seed_heavily_reused
         else "medium"
         if best_site_score >= 50
+        and not seed_heavily_reused
+        and seed_discriminance >= 30
         else "low"
     )
 
@@ -1653,6 +1712,7 @@ def _build_site_anchor(con: sqlite3.Connection, service_id: str) -> dict[str, An
         "endpoints": _rows_to_dicts(endpoints),
         "spatial_seeds": _rows_to_dicts(seeds),
         "spatial_evidence": _rows_to_dicts(spatial),
+        "best_spatial_seed": best_seed,
         "site_assets": site_assets,
         "network_hint_counts": dict(network_hint_counts) if network_hint_counts else {},
         "device_prefix_hints": device_prefixes,
@@ -2135,6 +2195,271 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
     }
 
 
+def _resolve_passive_chain(
+    con: sqlite3.Connection, service_id: str, site_id: str, depth: int = 2
+) -> dict[str, Any]:
+    site_id = (site_id or "").strip()
+    if not site_id:
+        return {"error": "site_id manquant"}
+
+    site_asset = None
+    if _table_or_view_exists(con, "v_site_passive_assets"):
+        site_asset = _row_to_dict(
+            con.execute(
+                "SELECT * FROM v_site_passive_assets WHERE site_id = ?",
+                (site_id,),
+            ).fetchone()
+        )
+    if site_asset is None:
+        site_asset = _row_to_dict(
+            con.execute(
+                "SELECT site_id, reference, geom_x, geom_y FROM ref_sites WHERE site_id = ?",
+                (site_id,),
+            ).fetchone()
+        )
+
+    housings = _rows_to_dicts(
+        con.execute(
+            "SELECT housing_id, migration_oid, housing_type, reference, description, site_id, site_name "
+            "FROM ref_optical_housing WHERE site_id = ? ORDER BY reference LIMIT 20",
+            (site_id,),
+        ).fetchall()
+    )
+    housing_migoids = [
+        row["migration_oid"] for row in housings if row.get("migration_oid")
+    ]
+
+    connections: list[dict[str, Any]] = []
+    cable_migoids: set[str] = set()
+    if housing_migoids and _table_or_view_exists(con, "ref_optical_connection"):
+        placeholders = ",".join("?" for _ in housing_migoids)
+        connection_rows = con.execute(
+            f"SELECT connection_id, housing_migration_oid, obj1_type, obj1_migration_oid, obj2_type, obj2_migration_oid "
+            f"FROM ref_optical_connection WHERE housing_migration_oid IN ({placeholders}) LIMIT 60",
+            tuple(housing_migoids),
+        ).fetchall()
+        for row in connection_rows:
+            row_dict = _row_to_dict(row) or {}
+            connections.append(row_dict)
+            for key_type, key_oid in (
+                ("obj1_type", "obj1_migration_oid"),
+                ("obj2_type", "obj2_migration_oid"),
+            ):
+                obj_type = str(row_dict.get(key_type) or "").upper()
+                obj_oid = str(row_dict.get(key_oid) or "").strip()
+                if obj_oid and "CABLE" in obj_type:
+                    cable_migoids.add(obj_oid)
+
+    cables: list[dict[str, Any]] = []
+    if cable_migoids:
+        placeholders = ",".join("?" for _ in cable_migoids)
+        cables = _rows_to_dicts(
+            con.execute(
+                f"SELECT cable_id, migration_oid, reference, userreference, comments, site_tokens_json, geom_centroid_x, geom_centroid_y "
+                f"FROM ref_optical_cable WHERE migration_oid IN ({placeholders}) LIMIT 40",
+                tuple(cable_migoids),
+            ).fetchall()
+        )
+
+    linked_leases: list[dict[str, Any]] = []
+    if _table_or_view_exists(con, "ref_optical_lease_endpoint"):
+        linked_leases = _rows_to_dicts(
+            con.execute(
+                "SELECT l.optical_lease_id, l.ref_exploit, l.reference, l.lease_kind, l.client, l.lessee, l.comments, "
+                "ep.endpoint_label, ep.site_name "
+                "FROM ref_optical_lease l "
+                "JOIN ref_optical_lease_endpoint ep ON ep.optical_lease_id = l.optical_lease_id "
+                "WHERE ep.site_id = ? ORDER BY l.ref_exploit LIMIT 20",
+                (site_id,),
+            ).fetchall()
+        )
+
+    nearby_route_endpoints: list[dict[str, Any]] = []
+    route_refs = {
+        (row.get("ref_exploit") or "").strip()
+        for row in linked_leases
+        if (row.get("ref_exploit") or "").strip()
+    }
+    if route_refs and _table_or_view_exists(con, "v_route_endpoint_sites"):
+        placeholders = ",".join("?" for _ in route_refs)
+        nearby_route_endpoints = _rows_to_dicts(
+            con.execute(
+                f"SELECT route_ref, route_id, step_type, site_label, bpe, cable_in, cable_out "
+                f"FROM v_route_endpoint_sites WHERE route_ref IN ({placeholders}) LIMIT 20",
+                tuple(route_refs),
+            ).fetchall()
+        )
+
+    return {
+        "service_id": service_id,
+        "site_id": site_id,
+        "depth": depth,
+        "site_asset": site_asset,
+        "housings": housings[: max(5, depth * 5)],
+        "connections": connections[: max(10, depth * 10)],
+        "cables": cables[: max(10, depth * 10)],
+        "linked_leases": linked_leases[: max(10, depth * 10)],
+        "route_endpoints": nearby_route_endpoints[: max(10, depth * 10)],
+    }
+
+
+def _resolve_cable_spatial(
+    con: sqlite3.Connection, service_id: str, radius_meters: int = 300
+) -> dict[str, Any]:
+    anchor = _build_site_anchor(con, service_id)
+    best_seed = anchor.get("best_spatial_seed") or {}
+    x_l93 = best_seed.get("x_l93")
+    y_l93 = best_seed.get("y_l93")
+    if x_l93 is None or y_l93 is None:
+        return {
+            "service_id": service_id,
+            "radius_meters": radius_meters,
+            "best_spatial_seed": best_seed or None,
+            "cable_candidates": [],
+            "summary": "Aucun seed spatial exploitable pour chercher des cables proches.",
+        }
+
+    query = (
+        "SELECT cable_id, reference, userreference, site_tokens_json, geom_centroid_x, geom_centroid_y, "
+        "((geom_centroid_x - ?) * (geom_centroid_x - ?) + (geom_centroid_y - ?) * (geom_centroid_y - ?)) AS distance_sq "
+        "FROM ref_optical_cable "
+        "WHERE geom_centroid_x BETWEEN ? AND ? AND geom_centroid_y BETWEEN ? AND ? "
+        "ORDER BY distance_sq ASC LIMIT 20"
+    )
+    rows = []
+    for row in con.execute(
+        query,
+        (
+            x_l93,
+            x_l93,
+            y_l93,
+            y_l93,
+            x_l93 - radius_meters,
+            x_l93 + radius_meters,
+            y_l93 - radius_meters,
+            y_l93 + radius_meters,
+        ),
+    ).fetchall():
+        row_dict = _row_to_dict(row) or {}
+        distance_sq = float(row_dict.pop("distance_sq") or 0.0)
+        if distance_sq <= float(radius_meters * radius_meters):
+            row_dict["distance_meters"] = round(distance_sq**0.5, 1)
+            rows.append(row_dict)
+    return {
+        "service_id": service_id,
+        "radius_meters": radius_meters,
+        "best_spatial_seed": best_seed,
+        "cable_candidates": rows,
+        "summary": f"{len(rows)} cable(s) a moins de {radius_meters}m du meilleur seed spatial.",
+    }
+
+
+def _hunt_route_from_site(
+    con: sqlite3.Connection, service_id: str, site_z_id: str | None = None
+) -> dict[str, Any]:
+    anchor = _build_site_anchor(con, service_id)
+    endpoint_rows = anchor.get("endpoints") or []
+    resolved_site_z = site_z_id or next(
+        (
+            row.get("matched_site_id")
+            for row in endpoint_rows
+            if row.get("endpoint_label") == "Z" and row.get("matched_site_id")
+        ),
+        None,
+    )
+    resolved_site_a = next(
+        (
+            row.get("matched_site_id")
+            for row in endpoint_rows
+            if row.get("endpoint_label") == "A" and row.get("matched_site_id")
+        ),
+        None,
+    )
+    if not resolved_site_z:
+        return {
+            "service_id": service_id,
+            "site_z_id": None,
+            "direct_evidence": [],
+            "context_only": [],
+            "passive_chain": None,
+            "summary": "Aucun site_z_id resolu pour demarrer la chasse route depuis le site.",
+        }
+
+    direct_evidence: list[dict[str, Any]] = []
+    context_only: list[dict[str, Any]] = []
+    seen_route_refs: set[str] = set()
+
+    if resolved_site_a and _table_or_view_exists(con, "v_lease_site_pair"):
+        for row in con.execute(
+            "SELECT optical_lease_id, ref_exploit, reference, lease_kind, site_a_name, site_z_name "
+            "FROM v_lease_site_pair WHERE (site_a_id = ? AND site_z_id = ?) OR (site_a_id = ? AND site_z_id = ?) "
+            "LIMIT 10",
+            (resolved_site_a, resolved_site_z, resolved_site_z, resolved_site_a),
+        ).fetchall():
+            route_ref = (row["ref_exploit"] or "").strip()
+            if route_ref and route_ref not in seen_route_refs:
+                seen_route_refs.add(route_ref)
+                direct_evidence.append(
+                    {
+                        "candidate_route_ref": route_ref,
+                        "candidate_lease_id": row["optical_lease_id"],
+                        "proof_level": "strong",
+                        "evidence_for": [
+                            f"lease {row['optical_lease_id']} relie directement site_a={resolved_site_a} et site_z={resolved_site_z}",
+                        ],
+                        "evidence_against": [],
+                        "source": "lease_site_pair_view",
+                    }
+                )
+
+    passive_chain = _resolve_passive_chain(con, service_id, resolved_site_z, depth=2)
+    for lease in passive_chain.get("linked_leases", []):
+        route_ref = str(lease.get("ref_exploit") or "").strip()
+        if route_ref and route_ref not in seen_route_refs:
+            seen_route_refs.add(route_ref)
+            context_only.append(
+                {
+                    "candidate_route_ref": route_ref,
+                    "candidate_lease_id": lease.get("optical_lease_id"),
+                    "source": "site_z_lease_presence",
+                    "evidence_for": [
+                        f"lease {lease.get('optical_lease_id')} touche site_z={resolved_site_z}",
+                    ],
+                    "evidence_against": [
+                        "site Z confirme, mais chainage jusqu'au site A ou au service encore indirect"
+                    ],
+                    "note": "bonne piste de route depuis le site Z",
+                }
+            )
+
+    cable_spatial = _resolve_cable_spatial(con, service_id, radius_meters=300)
+    if cable_spatial.get("cable_candidates"):
+        context_only.append(
+            {
+                "source": "cable_spatial",
+                "service_id": service_id,
+                "site_z_id": resolved_site_z,
+                "cable_candidates": cable_spatial["cable_candidates"][:5],
+                "evidence_for": [cable_spatial["summary"]],
+                "evidence_against": ["proximite cable seule - route non prouvee"],
+                "note": "utiliser resolve_passive_chain ou query_db pour remonter vers lease/route",
+            }
+        )
+
+    return {
+        "service_id": service_id,
+        "site_a_id": resolved_site_a,
+        "site_z_id": resolved_site_z,
+        "direct_evidence": direct_evidence,
+        "context_only": context_only,
+        "passive_chain": passive_chain,
+        "spatial_cables": cable_spatial.get("cable_candidates", []),
+        "summary": (
+            f"{len(direct_evidence)} evidence(s) directe(s), {len(context_only)} contexte(s) depuis site_z={resolved_site_z}."
+        ),
+    }
+
+
 def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
     """Chasse a la route optique - separe evidence directe vs contexte seul."""
     svc = con.execute(
@@ -2273,6 +2598,22 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                     "source": "lease_endpoint",
                 }
             )
+
+    # --- Source 3b : ancre site GDB -> chainage passif [strong/medium/context] ---
+    site_route_bundle = _hunt_route_from_site(con, service_id, svc["site_z_id"])
+    data_explored.append(
+        "hunt_route_from_site(site_z_id) via lease pair, passive chain, cable spatial"
+    )
+    for item in site_route_bundle.get("direct_evidence", []):
+        route_ref = str(item.get("candidate_route_ref") or "").strip()
+        if route_ref and route_ref not in seen_routes:
+            seen_routes.add(route_ref)
+            direct_evidence.append(item)
+    for item in site_route_bundle.get("context_only", []):
+        route_ref = str(item.get("candidate_route_ref") or "").strip()
+        if route_ref and route_ref in seen_routes:
+            continue
+        context_only.append(item)
 
     # --- Source 4 : leases par tokens de site/client dans comments/reference [medium] ---
     if client_tokens:
@@ -2532,6 +2873,7 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
         "toip_refs_in_lea": toip_refs,
         "direct_evidence": direct_evidence,
         "context_only": context_only,
+        "site_route_bundle": site_route_bundle,
         "data_explored": data_explored,
         "summary": (
             f"{len(direct_evidence)} evidence(s) directe(s) : "
@@ -2559,6 +2901,75 @@ async def hunt_site_anchor(args: dict[str, Any]) -> dict[str, Any]:
     con = _connect(read_only=True)
     try:
         payload = _build_site_anchor(con, service_id)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "resolve_passive_chain",
+    "Explore la chaine passive depuis un site GDB: site -> housing -> connection -> cable -> lease -> route. "
+    "Utile pour comprendre par ou passe la fibre et quels objets optiques sont attaches au site.",
+    {"service_id": str, "site_id": str, "depth": int},
+)
+async def resolve_passive_chain(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    site_id = args.get("site_id", "").strip()
+    depth = int(args.get("depth", 2) or 2)
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+    if not site_id:
+        return _text("ERROR: No site_id provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _resolve_passive_chain(con, service_id, site_id, depth=depth)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "resolve_cable_spatial",
+    "Recherche les cables optiques proches du meilleur seed spatial/BAN d'un service. "
+    "Retourne des candidats par distance en Lambert-93.",
+    {"service_id": str, "radius_meters": int},
+)
+async def resolve_cable_spatial(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    radius_meters = int(args.get("radius_meters", 300) or 300)
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _resolve_cable_spatial(con, service_id, radius_meters=radius_meters)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "hunt_route_from_site",
+    "Chasse a la route optique en partant du site GDB/Z: paires de lease, chainage passif et cables proches. "
+    "A privilegier quand l'ancre site est plus fiable que les labels.",
+    {"service_id": str, "site_z_id": str},
+)
+async def hunt_route_from_site(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    site_z_id = (args.get("site_z_id") or "").strip() or None
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _hunt_route_from_site(con, service_id, site_z_id)
         return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     except Exception as e:
         return _text(f"ERROR: {e}")

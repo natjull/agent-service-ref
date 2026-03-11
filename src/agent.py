@@ -56,6 +56,9 @@ from .tools.db_tools import (
     resolve_party_candidates,
     resolve_spatial_candidates,
     hunt_site_anchor,
+    resolve_passive_chain,
+    resolve_cable_spatial,
+    hunt_route_from_site,
     hunt_vlan,
     hunt_route,
     get_co_cluster,
@@ -92,6 +95,9 @@ def create_service_ref_server():
             resolve_spatial_candidates,
             # Hunt tools (chasse attributs cibles)
             hunt_site_anchor,
+            resolve_passive_chain,
+            resolve_cable_spatial,
+            hunt_route_from_site,
             hunt_vlan,
             hunt_route,
             get_co_cluster,
@@ -169,6 +175,9 @@ def create_agent_options(
             "mcp__service-ref__resolve_party_candidates",
             "mcp__service-ref__resolve_spatial_candidates",
             "mcp__service-ref__hunt_site_anchor",
+            "mcp__service-ref__resolve_passive_chain",
+            "mcp__service-ref__resolve_cable_spatial",
+            "mcp__service-ref__hunt_route_from_site",
             "mcp__service-ref__hunt_vlan",
             "mcp__service-ref__hunt_route",
             "mcp__service-ref__get_co_cluster",
@@ -176,6 +185,7 @@ def create_agent_options(
             "mcp__service-ref__read_config_file",
             "mcp__service-ref__submit_resolution",
             "mcp__service-ref__submit_and_validate",
+            "mcp__service-ref__submit_declared_gap",
             "mcp__service-ref__validate_resolution",
             "mcp__service-ref__list_resolutions",
             "mcp__service-ref__reconciliation_scorecard",
@@ -244,10 +254,28 @@ def _tool_summary(block: ToolUseBlock) -> str:
         return f"resolve_network_candidates — {inp.get('service_id', '?')}"
     elif name == "resolve_spatial_candidates":
         return f"resolve_spatial_candidates — {inp.get('service_id', '?')}"
+    elif name == "hunt_site_anchor":
+        return f"hunt_site_anchor — {inp.get('service_id', '?')}"
+    elif name == "resolve_passive_chain":
+        return (
+            f"resolve_passive_chain — {inp.get('site_id', inp.get('service_id', '?'))}"
+        )
+    elif name == "resolve_cable_spatial":
+        return f"resolve_cable_spatial — {inp.get('service_id', '?')}"
+    elif name == "hunt_route_from_site":
+        return f"hunt_route_from_site — {inp.get('service_id', '?')}"
+    elif name == "hunt_vlan":
+        return f"hunt_vlan — {inp.get('service_id', '?')}"
+    elif name == "hunt_route":
+        return f"hunt_route — {inp.get('service_id', '?')}"
+    elif name == "get_co_cluster":
+        return f"get_co_cluster — {inp.get('location_prefix', '?')}"
     elif name == "submit_resolution":
         return f"submit_resolution — {inp.get('service_id', '?')}"
     elif name == "submit_and_validate":
         return f"submit_and_validate — {inp.get('service_id', '?')}"
+    elif name == "submit_declared_gap":
+        return f"submit_declared_gap — {inp.get('service_id', '?')}"
     elif name == "validate_resolution":
         return f"validate_resolution — {inp.get('service_id', '?')}"
     elif name == "resolve_party_candidates":

@@ -169,20 +169,20 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
                 _latest_agent_resolutions_cte()
                 + """
                 SELECT
-                    SUM(CASE WHEN s.nature_service = 'Lan To Lan' THEN 1 ELSE 0 END) AS l2l_total,
-                    SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> '' THEN 1 ELSE 0 END) AS l2l_route,
-                    SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.network_vlan_id IS NOT NULL AND TRIM(la.network_vlan_id) <> '' THEN 1 ELSE 0 END) AS l2l_vlan,
-                    SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> ''
-                              AND la.network_vlan_id IS NOT NULL AND TRIM(la.network_vlan_id) <> '' THEN 1 ELSE 0 END) AS l2l_dual,
-                    SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> ''
+                    COALESCE(SUM(CASE WHEN s.nature_service = 'Lan To Lan' THEN 1 ELSE 0 END), 0) AS l2l_total,
+                    COALESCE(SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> '' THEN 1 ELSE 0 END), 0) AS l2l_route,
+                    COALESCE(SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.network_vlan_id IS NOT NULL AND TRIM(la.network_vlan_id) <> '' THEN 1 ELSE 0 END), 0) AS l2l_vlan,
+                    COALESCE(SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> ''
+                              AND la.network_vlan_id IS NOT NULL AND TRIM(la.network_vlan_id) <> '' THEN 1 ELSE 0 END), 0) AS l2l_dual,
+                    COALESCE(SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> ''
                               AND la.network_vlan_id IS NOT NULL AND TRIM(la.network_vlan_id) <> ''
-                              AND ((la.cpe_id IS NOT NULL AND TRIM(la.cpe_id) <> '') OR (la.network_interface_id IS NOT NULL AND TRIM(la.network_interface_id) <> '')) THEN 1 ELSE 0 END) AS l2l_triplet,
-                    SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND COALESCE(la.resolution_status, 'validated') = 'declared_gap' THEN 1 ELSE 0 END) AS l2l_declared_gap,
-                    SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') THEN 1 ELSE 0 END) AS fon_total,
-                    SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> '' THEN 1 ELSE 0 END) AS fon_route,
-                    SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') AND COALESCE(la.resolution_status, 'validated') = 'declared_gap' THEN 1 ELSE 0 END) AS fon_declared_gap
-                FROM latest_agent la
-                JOIN service_master_active s ON s.service_id = la.service_id
+                              AND ((la.cpe_id IS NOT NULL AND TRIM(la.cpe_id) <> '') OR (la.network_interface_id IS NOT NULL AND TRIM(la.network_interface_id) <> '')) THEN 1 ELSE 0 END), 0) AS l2l_triplet,
+                    COALESCE(SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND COALESCE(la.resolution_status, 'validated') = 'declared_gap' THEN 1 ELSE 0 END), 0) AS l2l_declared_gap,
+                    COALESCE(SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') THEN 1 ELSE 0 END), 0) AS fon_total,
+                    COALESCE(SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> '' THEN 1 ELSE 0 END), 0) AS fon_route,
+                    COALESCE(SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') AND COALESCE(la.resolution_status, 'validated') = 'declared_gap' THEN 1 ELSE 0 END), 0) AS fon_declared_gap
+                FROM service_master_active s
+                LEFT JOIN latest_agent la ON la.service_id = s.service_id
                 """
             ).fetchone()
 
@@ -366,13 +366,13 @@ def compute_compact_scorecard(db_path: Path) -> str:
             _latest_agent_resolutions_cte()
             + """
             SELECT
-                SUM(CASE WHEN s.nature_service = 'Lan To Lan' THEN 1 ELSE 0 END) AS l2l_total,
-                SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> '' THEN 1 ELSE 0 END) AS l2l_route,
-                SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.network_vlan_id IS NOT NULL AND TRIM(la.network_vlan_id) <> '' THEN 1 ELSE 0 END) AS l2l_vlan,
-                SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') THEN 1 ELSE 0 END) AS fon_total,
-                SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> '' THEN 1 ELSE 0 END) AS fon_route
-            FROM latest_agent la
-            JOIN service_master_active s ON s.service_id = la.service_id
+                COALESCE(SUM(CASE WHEN s.nature_service = 'Lan To Lan' THEN 1 ELSE 0 END), 0) AS l2l_total,
+                COALESCE(SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> '' THEN 1 ELSE 0 END), 0) AS l2l_route,
+                COALESCE(SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.network_vlan_id IS NOT NULL AND TRIM(la.network_vlan_id) <> '' THEN 1 ELSE 0 END), 0) AS l2l_vlan,
+                COALESCE(SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') THEN 1 ELSE 0 END), 0) AS fon_total,
+                COALESCE(SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> '' THEN 1 ELSE 0 END), 0) AS fon_route
+            FROM service_master_active s
+            LEFT JOIN latest_agent la ON la.service_id = s.service_id
             """
         ).fetchone()
         remaining = max(total - resolved, 0)

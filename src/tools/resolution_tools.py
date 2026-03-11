@@ -114,7 +114,8 @@ def ensure_agent_tables(db_path: Path) -> None:
     try:
         con.executescript(AGENT_SCHEMA_SQL)
         existing_columns = {
-            row[1] for row in con.execute("PRAGMA table_info(agent_resolutions)").fetchall()
+            row[1]
+            for row in con.execute("PRAGMA table_info(agent_resolutions)").fetchall()
         }
         for column_name, column_type in _AGENT_RESOLUTION_COLUMNS.items():
             if column_name not in existing_columns:
@@ -131,18 +132,24 @@ def _text(content: str) -> dict[str, Any]:
 
 
 def _distinct_evidence_types(evidences: list[dict[str, Any]]) -> set[str]:
-    return {str(ev.get("evidence_type", "unknown")).strip() or "unknown" for ev in evidences}
+    return {
+        str(ev.get("evidence_type", "unknown")).strip() or "unknown" for ev in evidences
+    }
 
 
 def _has_party_search_evidence(evidences: list[dict[str, Any]]) -> bool:
-    return any(str(ev.get("evidence_type", "")).strip() == "party_search" for ev in evidences)
+    return any(
+        str(ev.get("evidence_type", "")).strip() == "party_search" for ev in evidences
+    )
 
 
 def _mentions_party_search_failure(justification: str) -> bool:
     lowered = justification.lower()
     required_markers = ("party", "final")
     failure_markers = ("introuv", "not found", "unresolved", "search", "recherche")
-    return all(marker in lowered for marker in required_markers) and any(marker in lowered for marker in failure_markers)
+    return all(marker in lowered for marker in required_markers) and any(
+        marker in lowered for marker in failure_markers
+    )
 
 
 @tool(
@@ -178,11 +185,15 @@ async def submit_resolution(args: dict[str, Any]) -> dict[str, Any]:
             (service_id,),
         ).fetchone()
         if not svc:
-            return _text(f"ERROR: service_id '{service_id}' not found in service_master_active.")
+            return _text(
+                f"ERROR: service_id '{service_id}' not found in service_master_active."
+            )
 
         confidence = resolution.get("confidence", "low")
         if confidence not in ("high", "medium", "low"):
-            return _text(f"ERROR: confidence must be high/medium/low, got '{confidence}'.")
+            return _text(
+                f"ERROR: confidence must be high/medium/low, got '{confidence}'."
+            )
 
         evidences = resolution.get("evidences", [])
         if not evidences:
@@ -248,11 +259,13 @@ async def submit_resolution(args: dict[str, Any]) -> dict[str, Any]:
 
         # Insert evidences
         for ev in evidences:
-            ev_id = _safe_hash([
-                resolution_id,
-                ev.get("evidence_type", ""),
-                ev.get("description", ""),
-            ])
+            ev_id = _safe_hash(
+                [
+                    resolution_id,
+                    ev.get("evidence_type", ""),
+                    ev.get("description", ""),
+                ]
+            )
             payload = json.dumps(ev.get("payload", {})) if ev.get("payload") else None
             con.execute(
                 """INSERT OR REPLACE INTO agent_evidence
@@ -333,8 +346,14 @@ async def validate_resolution(args: dict[str, Any]) -> dict[str, Any]:
             checks.append("resolution_status=declared_gap")
 
         # Anti self-loop: site_a must differ from site_z
-        if res["site_a"] and res["site_z"] and res["site_a"].strip().upper() == res["site_z"].strip().upper():
-            errors.append(f"site_a and site_z are identical ('{res['site_a']}') — self-loop")
+        if (
+            res["site_a"]
+            and res["site_z"]
+            and res["site_a"].strip().upper() == res["site_z"].strip().upper()
+        ):
+            errors.append(
+                f"site_a and site_z are identical ('{res['site_a']}') — self-loop"
+            )
 
         if not (res["party_final_id"] or "").strip():
             checks.append("party_final_id missing — noted in justification")
@@ -364,7 +383,12 @@ async def validate_resolution(args: dict[str, Any]) -> dict[str, Any]:
             if dev:
                 checks.append(f"network device '{res['network_support_id']}' found")
                 # Also validate POP association
-                vr = validate_device_pop(con, res["network_support_id"], res["site_a"] or "", res["site_z"] or "")
+                vr = validate_device_pop(
+                    con,
+                    res["network_support_id"],
+                    res["site_a"] or "",
+                    res["site_z"] or "",
+                )
                 if vr.passed:
                     checks.append(f"POP check: {vr.detail}")
                 else:
@@ -375,15 +399,27 @@ async def validate_resolution(args: dict[str, Any]) -> dict[str, Any]:
                     (res["network_support_id"],),
                 ).fetchone()
                 if iface:
-                    checks.append(f"network device '{res['network_support_id']}' found in interfaces")
+                    checks.append(
+                        f"network device '{res['network_support_id']}' found in interfaces"
+                    )
                 else:
-                    warnings.append(f"network device '{res['network_support_id']}' NOT found")
+                    warnings.append(
+                        f"network device '{res['network_support_id']}' NOT found"
+                    )
 
         # Validate optical route endpoints
-        if res["optical_support_ref"]:
-            vr = validate_route_endpoints(con, res["optical_support_ref"], res["site_a"] or "", res["site_z"] or "")
+        route_to_validate = (
+            res["route_ref"] or res["optical_support_ref"] or ""
+        ).strip()
+        if route_to_validate:
+            vr = validate_route_endpoints(
+                con, route_to_validate, res["site_a"] or "", res["site_z"] or ""
+            )
             if vr.passed:
-                checks.append(f"optical route: {vr.detail}")
+                if vr.score >= 90:
+                    checks.append(f"optical route: {vr.detail}")
+                else:
+                    warnings.append(f"optical route: {vr.detail}")
             else:
                 warnings.append(f"optical route: {vr.detail}")
 
@@ -394,9 +430,13 @@ async def validate_resolution(args: dict[str, Any]) -> dict[str, Any]:
                 (res["party_final_id"],),
             ).fetchone()
             if party:
-                checks.append(f"party '{res['party_final_id']}' ({party['canonical_name']}) found")
+                checks.append(
+                    f"party '{res['party_final_id']}' ({party['canonical_name']}) found"
+                )
             else:
-                warnings.append(f"party_final_id '{res['party_final_id']}' NOT found in party_master")
+                warnings.append(
+                    f"party_final_id '{res['party_final_id']}' NOT found in party_master"
+                )
 
         # Note low confidence for reporting
         if res["confidence"] == "low":
@@ -505,7 +545,9 @@ async def submit_and_validate(args: dict[str, Any]) -> dict[str, Any]:
     if "ERROR:" in submit_text:
         return submit_result
 
-    validate_result = await validate_resolution.handler({"service_id": service_id or args.get("service_id", "")})
+    validate_result = await validate_resolution.handler(
+        {"service_id": service_id or args.get("service_id", "")}
+    )
     validate_text = validate_result["content"][0]["text"]
     return _text(f"{submit_text}\n\n---\n\n{validate_text}")
 
@@ -517,7 +559,7 @@ async def submit_and_validate(args: dict[str, Any]) -> dict[str, Any]:
     "missing_attribute : 'network_vlan_id' | 'route_ref' | 'both'. "
     "searched_sources : liste des tables consultees (ex: ['ref_network_vlans', 'ref_co_subinterface']). "
     "observed_gap_type : 'label_absent' | 'site_code_unlinked' | 'toip_not_in_xconnect' | "
-    "'no_lease_at_site' | 'gdb_site_out_of_scope' | 'data_not_loaded'. "
+    "'no_lease_at_site' | 'gdb_site_out_of_scope' | 'spatial_seed_unreliable' | 'data_not_loaded'. "
     "next_best_hint : ce qui permettrait de conclure si la donnee etait disponible. "
     "justification : explication narrative du diagnostic.",
     {
@@ -540,7 +582,9 @@ async def submit_declared_gap(args: dict[str, Any]) -> dict[str, Any]:
     if not service_id:
         return _text("ERROR: No service_id provided.")
     if not missing_attribute:
-        return _text("ERROR: missing_attribute required (network_vlan_id | route_ref | both).")
+        return _text(
+            "ERROR: missing_attribute required (network_vlan_id | route_ref | both)."
+        )
     if not justification:
         return _text("ERROR: justification required.")
 
@@ -551,8 +595,13 @@ async def submit_declared_gap(args: dict[str, Any]) -> dict[str, Any]:
         )
 
     valid_gap_types = {
-        "label_absent", "site_code_unlinked", "toip_not_in_xconnect",
-        "no_lease_at_site", "gdb_site_out_of_scope", "data_not_loaded",
+        "label_absent",
+        "site_code_unlinked",
+        "toip_not_in_xconnect",
+        "no_lease_at_site",
+        "gdb_site_out_of_scope",
+        "spatial_seed_unreliable",
+        "data_not_loaded",
     }
     if observed_gap_type and observed_gap_type not in valid_gap_types:
         return _text(
@@ -569,16 +618,22 @@ async def submit_declared_gap(args: dict[str, Any]) -> dict[str, Any]:
             (service_id,),
         ).fetchone()
         if not svc:
-            return _text(f"ERROR: service_id '{service_id}' not found in service_master_active.")
+            return _text(
+                f"ERROR: service_id '{service_id}' not found in service_master_active."
+            )
 
         gap_payload = {
             "missing_attribute": missing_attribute,
-            "searched_sources": searched_sources if isinstance(searched_sources, list) else list(searched_sources),
+            "searched_sources": searched_sources
+            if isinstance(searched_sources, list)
+            else list(searched_sources),
             "observed_gap_type": observed_gap_type or None,
             "next_best_hint": next_best_hint or None,
         }
 
-        resolution_id = _safe_hash([service_id, "declared_gap", datetime.now().isoformat()])
+        resolution_id = _safe_hash(
+            [service_id, "declared_gap", datetime.now().isoformat()]
+        )
 
         con.execute(
             """INSERT OR REPLACE INTO agent_resolutions
