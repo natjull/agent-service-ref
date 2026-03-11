@@ -18,13 +18,17 @@ def _schema_summary(db_path: Path) -> str:
         lines = []
         for (table_name,) in tables:
             try:
-                count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+                count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[
+                    0
+                ]
             except Exception:
                 count = "?"
             cols = con.execute(f'PRAGMA table_info("{table_name}")').fetchall()
             col_names = [c[1] for c in cols[:8]]
             suffix = f" +{len(cols) - 8}" if len(cols) > 8 else ""
-            lines.append(f"- **{table_name}** ({count} rows): {', '.join(col_names)}{suffix}")
+            lines.append(
+                f"- **{table_name}** ({count} rows): {', '.join(col_names)}{suffix}"
+            )
 
         return "\n".join(lines)
     finally:
@@ -50,7 +54,9 @@ def _live_stats(db_path: Path) -> str:
             "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_resolutions'"
         ).fetchone()
         if has_agent:
-            agent_count = con.execute("SELECT COUNT(*) FROM agent_resolutions").fetchone()[0]
+            agent_count = con.execute(
+                "SELECT COUNT(*) FROM agent_resolutions"
+            ).fetchone()[0]
 
         return (
             f"- Services actifs: {total}\n"
@@ -163,6 +169,7 @@ Tu travailles sur un SQLite. Tu le consultes librement avec `query_db`.
 - `resolve_optical_candidates` : supports optiques candidats (routes, leases, cables)
 - `resolve_network_candidates` : VLANs par label client, sub-interfaces CO, CPE candidats, hints pipeline
 - `resolve_spatial_candidates` : evidences spatiales (distances BAN/GDB vers sites)
+- `hunt_site_anchor` : **point de depart d'enquete** — qualite des sites A/Z, seeds spatiaux, assets optiques proches, point d'entree recommande
 - `hunt_vlan` : **point de depart L2L** — chasse VLAN multi-sources avec hypotheses (evidence_for/against/proof_level)
 - `hunt_route` : **point de depart L2L/FON** — chasse route optique, separe evidence directe vs contexte seul
 - `get_co_cluster` : cartographie cohorte d'un CO (COM1, CRL1, AMI3, BEA1) — circuits actifs vs pool
@@ -205,6 +212,32 @@ Consulte les hints pipeline (`service_support_reseau`, `service_support_optique`
 Ce sont des pistes de retrieval, pas des matchs valides. Un score eleve signifie une bonne piste a verifier,
 pas une decision finale. C'est toi qui valides ou rejettes.
 
+Choisis ensuite ton **point d'entree d'enquete**. Il n'y a pas de sequence rigide, mais la priorite recommandee est :
+1. **site GDB** quand `hunt_site_anchor` montre des sites A/Z fiables ou de bonnes evidences spatiales ;
+2. **route/TOIP/service_ref** quand LEA contient deja une ancre numerique forte ;
+3. **reseau actif** (`VLAN`, `interface`, `CPE`, `CO`) quand l'ancre site est faible mais qu'un indice reseau est solide.
+
+Si un point d'entree devient sterlie ou ambigu, bifurque. Tu n'es pas un executeur de playbook : tu es un enqueteur.
+
+### Logique d'enquete recommandee
+
+**1) Ancrage site / spatial**
+- Appelle `hunt_site_anchor(service_id)` quand l'ancre n'est pas evidente.
+- Privilegie le **site GDB** comme ancre par defaut quand il est fiable (`site_anchor_quality` medium/high).
+- Regarde les `spatial_seeds`, `spatial_evidence`, `site_assets` et les actifs optiques proches avant de conclure qu'il manque des donnees.
+
+**2) Faisceau topo / passive**
+- Depuis le site, remonte la chaine passive : `ref_optical_housing` -> `ref_optical_connection` -> `ref_optical_cable` -> `ref_optical_lease` -> `ref_route_parcours`.
+- Une route geographiquement voisine ou un housing seul ne suffisent pas ; ils servent a construire et tester des hypotheses.
+
+**3) Validation reseau**
+- Pour L2L, confirme ensuite avec `hunt_vlan`, `ref_network_interfaces`, `ref_swag_interfaces`, `ref_co_subinterface`, `ref_cpe_inventory`.
+- Une hypothese VLAN doit etre coherente avec le site/POP/coeur, pas seulement avec un label ou un token client.
+
+**4) Decision**
+- Si plusieurs sources convergent, soumets une resolution.
+- Sinon, soumets un `declared_gap` explicite. Mieux vaut un gap propre qu'une precision inventee.
+
 ### VLAN (pour L2L)
 
 Les labels VLAN dans `ref_network_vlans` contiennent le nom du client en clair.
@@ -218,13 +251,18 @@ Depuis le VLAN trouve :
 - `ref_co_subinterface` donne le CO qui porte ce VLAN et le site distant
 - `ref_network_interfaces` et `ref_cpe_inventory` donnent l'interface et le CPE
 
+Ne t'arrete pas au premier label plausible. Valide le VLAN par un faisceau :
+- ancre directe (`TOIP` / `xconnect_circuit_id` / `service_ref`) ;
+- coherence avec le site ou le POP ;
+- interface/CPE/core si disponible.
+
 Renseigne `network_vlan_id`, `inferred_vlans_json`, `network_interface_id`, `cpe_id`.
 
 ### Route optique
 
 ~60% des refs TOIP dans LEA n'existent pas en GDB. C'est normal (donnees legacy). Ne t'arrete pas a l'absence.
 
-Sources a explorer (pas de sequence imposee — utilise ton jugement) :
+Sources a explorer (pas de sequence imposee - utilise ton jugement) :
 - `ref_routes` / `ref_optical_logical_route` : si le TOIP LEA existe
 - `ref_optical_lease` + `ref_optical_lease_endpoint` : leases au site Z ou entre sites A et Z
 - `ref_route_parcours` : chaque route a des etapes origin/destination avec site, BPE, cable_in/cable_out.
@@ -236,6 +274,8 @@ Sources a explorer (pas de sequence imposee — utilise ton jugement) :
   `site_tokens_json` et geometrie (start/end/centroid en L93) permettent la recherche spatiale.
 - `search_configs` sur les devices CO : descriptions d'interfaces physiques avec TOIP
 - `resolve_optical_candidates` te donne deja les candidats cable/housing pre-calcules par le pipeline
+
+Commence par le site GDB quand il est fiable. Bascule vers une ancre route (`TOIP`, `ref_exploit`, `service_ref`) si elle est plus forte.
 
 Collecte les candidats, evalue leur confiance, choisis le meilleur.
 Renseigne `route_ref`, `route_id`, `lease_id`, `cable_id`, `housing_id` selon ce que tu trouves.
@@ -302,6 +342,7 @@ Chaque attribut cible (route_ref, network_vlan_id) doit avoir une chaine de preu
 - Label client dans ref_network_vlans + site coherent (sans CPE ni TOIP confirme)
 - Lease avec endpoints aux sites A et Z (les deux bouts confirmes)
 - Un seul bout confirme pour la lease
+- Route ou lease appuyee par une ancre site GDB fiable + chaine housing/cable/parcours coherente
 
 **Declared_gap (obligatoire si attribut cible absent apres investigation complete) :**
 - Utilise `submit_declared_gap` avec : missing_attribute, searched_sources, observed_gap_type, next_best_hint
@@ -326,15 +367,16 @@ Ces outils sont des points de depart qui maximisent les chances — pas un chemi
 Si une piste annexe est plus prometteuse, bifurque. `query_db` reste disponible pour tout.
 
 **Pour L2L :**
-1. `hunt_vlan(service_id)` : commence par la. Retourne des hypotheses VLAN avec evidence_for/against/proof_level.
-   Sources dans l'ordre : TOIP xconnect [strong], labels ref_network_vlans [medium], CO actifs [medium], CPE [strong].
-2. `hunt_route(service_id)` : retourne direct_evidence (suffisant) vs context_only (non suffisant seul).
-3. `get_co_cluster(prefix)` : si hunt_vlan revient vide ou weak seulement — vue cohorte du CO.
+1. `hunt_site_anchor(service_id)` : par defaut si l'ancre n'est pas evidente.
+2. `hunt_vlan(service_id)` : hypotheses VLAN avec evidence_for/against/proof_level.
+3. `hunt_route(service_id)` : direct_evidence (suffisant) vs context_only (non suffisant seul).
+4. `get_co_cluster(prefix)` : si hunt_vlan revient vide ou weak seulement - vue cohorte du CO.
    COM1 = Compiegne, CRL1 = Creil, AMI3 = Amiens, BEA1 = Beauvais (mapping transitoire).
 
 **Pour FON :**
-1. `hunt_route(service_id)` : point de depart. Si direct_evidence vide → explore context_only.
-2. Si la route n'est pas en GDB (TOIP absent) : cherche via housing/cables au site Z → `query_db`.
+1. `hunt_site_anchor(service_id)` : premier outil si le site Z ou le POP A est ambigu.
+2. `hunt_route(service_id)` : point de depart route. Si `direct_evidence` vide, explore `context_only`.
+3. Si la route n'est pas en GDB (TOIP absent) : cherche via housing/cables au site Z -> `query_db`.
 
 **Apres investigation exhaustive sans attribut cible :**
 - Appelle `submit_declared_gap` avec le diagnostic structure.
@@ -345,6 +387,9 @@ Si une piste annexe est plus prometteuse, bifurque. `query_db` reste disponible 
 Tu es autonome. Enchaine les services, documente tes choix, appelle `reconciliation_scorecard`
 regulierement. Traite les services par lot coherent quand c'est possible.
 
-Pour chaque service : (1) hunt_vlan + hunt_route → (2) confirme ou rejette les hypotheses →
-(3) submit_and_validate si attributs cibles trouves, ou submit_declared_gap si gap avere.
+Pour chaque service :
+(1) choisir ton point d'entree (`hunt_site_anchor`, `hunt_vlan`, `hunt_route`) ;
+(2) croiser topo passive + reseau actif ;
+(3) confirmer ou rejeter les hypotheses ;
+(4) `submit_and_validate` si attributs cibles trouves, ou `submit_declared_gap` si gap avere.
 """

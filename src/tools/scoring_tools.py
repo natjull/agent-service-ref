@@ -40,9 +40,28 @@ def _normalized_status(status: str) -> str:
     return status
 
 
+def _latest_agent_resolutions_cte() -> str:
+    return """
+    WITH latest_agent AS (
+        SELECT *
+        FROM (
+            SELECT ar.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY ar.service_id
+                       ORDER BY datetime(ar.created_at) DESC, ar.created_at DESC, ar.resolution_id DESC
+                   ) AS rn
+            FROM agent_resolutions ar
+        ) ranked
+        WHERE rn = 1
+    )
+    """
+
+
 def _count_alias_direct_matches(con: sqlite3.Connection) -> int:
     alias_rows = con.execute("SELECT normalized_alias FROM party_alias").fetchall()
-    normalized_aliases = {row["normalized_alias"] for row in alias_rows if row["normalized_alias"]}
+    normalized_aliases = {
+        row["normalized_alias"] for row in alias_rows if row["normalized_alias"]
+    }
     service_rows = con.execute(
         """
         SELECT DISTINCT sm.service_id, sm.principal_client
@@ -76,7 +95,9 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
         lines.append("=" * 64)
 
         # Total services
-        total = con.execute("SELECT COUNT(*) c FROM service_master_active").fetchone()["c"]
+        total = con.execute("SELECT COUNT(*) c FROM service_master_active").fetchone()[
+            "c"
+        ]
 
         # Gold states
         gold_states = con.execute(
@@ -97,7 +118,8 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
 
         if agent_table_exists:
             res_stats = con.execute(
-                "SELECT confidence, status, COUNT(*) c FROM agent_resolutions "
+                _latest_agent_resolutions_cte()
+                + "SELECT confidence, status, COUNT(*) c FROM latest_agent "
                 "GROUP BY confidence, status ORDER BY confidence, status"
             ).fetchall()
 
@@ -105,39 +127,34 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
             by_confidence = {}
             by_status = {}
             for r in res_stats:
-                by_confidence[r["confidence"]] = by_confidence.get(r["confidence"], 0) + r["c"]
+                by_confidence[r["confidence"]] = (
+                    by_confidence.get(r["confidence"], 0) + r["c"]
+                )
                 status_key = _normalized_status(r["status"])
                 by_status[status_key] = by_status.get(status_key, 0) + r["c"]
 
             proposed = con.execute(
-                "SELECT COUNT(*) c FROM agent_resolutions WHERE status = 'proposed'"
+                _latest_agent_resolutions_cte()
+                + "SELECT COUNT(*) c FROM latest_agent WHERE status = 'proposed'"
             ).fetchone()["c"]
             missing_party = con.execute(
-                """
-                SELECT COUNT(*) c
-                FROM agent_resolutions
-                WHERE party_final_id IS NULL OR TRIM(party_final_id) = ''
-                """
+                _latest_agent_resolutions_cte()
+                + "SELECT COUNT(*) c FROM latest_agent WHERE party_final_id IS NULL OR TRIM(party_final_id) = ''"
             ).fetchone()["c"]
             medium_high_missing_party = con.execute(
-                """
-                SELECT COUNT(*) c
-                FROM agent_resolutions
-                WHERE confidence IN ('medium', 'high')
-                  AND (party_final_id IS NULL OR TRIM(party_final_id) = '')
-                """
+                _latest_agent_resolutions_cte()
+                + "SELECT COUNT(*) c FROM latest_agent WHERE confidence IN ('medium', 'high') "
+                "AND (party_final_id IS NULL OR TRIM(party_final_id) = '')"
             ).fetchone()["c"]
             low_one_evidence = con.execute(
-                """
-                SELECT COUNT(*) c
-                FROM agent_resolutions
-                WHERE confidence = 'low' AND evidence_count = 1
-                """
+                _latest_agent_resolutions_cte()
+                + "SELECT COUNT(*) c FROM latest_agent WHERE confidence = 'low' AND evidence_count = 1"
             ).fetchone()["c"]
             low_one_party_only = con.execute(
-                """
+                _latest_agent_resolutions_cte()
+                + """
                 SELECT COUNT(*) c
-                FROM agent_resolutions ar
+                FROM latest_agent ar
                 WHERE ar.confidence = 'low'
                   AND ar.evidence_count = 1
                   AND EXISTS (
@@ -148,6 +165,26 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
                   )
                 """
             ).fetchone()["c"]
+            north_star = con.execute(
+                _latest_agent_resolutions_cte()
+                + """
+                SELECT
+                    SUM(CASE WHEN s.nature_service = 'Lan To Lan' THEN 1 ELSE 0 END) AS l2l_total,
+                    SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> '' THEN 1 ELSE 0 END) AS l2l_route,
+                    SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.network_vlan_id IS NOT NULL AND TRIM(la.network_vlan_id) <> '' THEN 1 ELSE 0 END) AS l2l_vlan,
+                    SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> ''
+                              AND la.network_vlan_id IS NOT NULL AND TRIM(la.network_vlan_id) <> '' THEN 1 ELSE 0 END) AS l2l_dual,
+                    SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> ''
+                              AND la.network_vlan_id IS NOT NULL AND TRIM(la.network_vlan_id) <> ''
+                              AND ((la.cpe_id IS NOT NULL AND TRIM(la.cpe_id) <> '') OR (la.network_interface_id IS NOT NULL AND TRIM(la.network_interface_id) <> '')) THEN 1 ELSE 0 END) AS l2l_triplet,
+                    SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND COALESCE(la.resolution_status, 'validated') = 'declared_gap' THEN 1 ELSE 0 END) AS l2l_declared_gap,
+                    SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') THEN 1 ELSE 0 END) AS fon_total,
+                    SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> '' THEN 1 ELSE 0 END) AS fon_route,
+                    SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') AND COALESCE(la.resolution_status, 'validated') = 'declared_gap' THEN 1 ELSE 0 END) AS fon_declared_gap
+                FROM latest_agent la
+                JOIN service_master_active s ON s.service_id = la.service_id
+                """
+            ).fetchone()
 
             lines.append(f"\n AGENT RESOLUTIONS: {total_resolved}")
             for conf in ("high", "medium", "low"):
@@ -165,14 +202,39 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
             lines.append(f" MEDIUM/HIGH SANS PARTY_FINAL: {medium_high_missing_party}")
             lines.append(f" LOW A 1 EVIDENCE: {low_one_evidence}")
             lines.append(f" LOW A 1 EVIDENCE PARTY ONLY: {low_one_party_only}")
+            lines.append("\n NORTH STAR PRODUIT:")
+            lines.append(
+                f"   L2L route_ref: {north_star['l2l_route']}/{north_star['l2l_total']}"
+            )
+            lines.append(
+                f"   L2L network_vlan_id: {north_star['l2l_vlan']}/{north_star['l2l_total']}"
+            )
+            lines.append(
+                f"   L2L route+vlan: {north_star['l2l_dual']}/{north_star['l2l_total']}"
+            )
+            lines.append(
+                f"   L2L triplet route+vlan+(cpe/interface): {north_star['l2l_triplet']}/{north_star['l2l_total']}"
+            )
+            lines.append(
+                f"   L2L declared_gap: {north_star['l2l_declared_gap']}/{north_star['l2l_total']}"
+            )
+            lines.append(
+                f"   FON route_ref: {north_star['fon_route']}/{north_star['fon_total']}"
+            )
+            lines.append(
+                f"   FON declared_gap: {north_star['fon_declared_gap']}/{north_star['fon_total']}"
+            )
 
             # Auto-valid confirmations
             confirmed = con.execute(
-                """SELECT COUNT(*) c FROM agent_resolutions a
+                _latest_agent_resolutions_cte()
+                + """SELECT COUNT(*) c FROM latest_agent a
                    JOIN gold_service_active g ON g.service_id = a.service_id
                    WHERE g.match_state = 'auto_valid'"""
             ).fetchone()["c"]
-            lines.append(f"\n AUTO-VALIDES CONFIRMES PAR AGENT: {confirmed}/{auto_valid}")
+            lines.append(
+                f"\n AUTO-VALIDES CONFIRMES PAR AGENT: {confirmed}/{auto_valid}"
+            )
         else:
             lines.append(f"\n AGENT RESOLUTIONS: 0 (tables non creees)")
             lines.append(f" NON TRAITES: {total}")
@@ -180,11 +242,26 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
         # Coverage by axis
         lines.append("\n COUVERTURE PAR AXE:")
         axes = [
-            ("Site matche", "SELECT COUNT(DISTINCT service_id) c FROM service_endpoint WHERE matched_site_id IS NOT NULL"),
-            ("Support reseau", "SELECT COUNT(DISTINCT service_id) c FROM service_support_reseau"),
-            ("Route optique", "SELECT COUNT(DISTINCT service_id) c FROM service_support_optique WHERE support_type = 'route'"),
-            ("Lease optique", "SELECT COUNT(DISTINCT service_id) c FROM service_support_optique WHERE support_type = 'lease'"),
-            ("Party final", f"SELECT COUNT(DISTINCT service_id) c FROM service_party WHERE {_party_role_query()}"),
+            (
+                "Site matche",
+                "SELECT COUNT(DISTINCT service_id) c FROM service_endpoint WHERE matched_site_id IS NOT NULL",
+            ),
+            (
+                "Support reseau",
+                "SELECT COUNT(DISTINCT service_id) c FROM service_support_reseau",
+            ),
+            (
+                "Route optique",
+                "SELECT COUNT(DISTINCT service_id) c FROM service_support_optique WHERE support_type = 'route'",
+            ),
+            (
+                "Lease optique",
+                "SELECT COUNT(DISTINCT service_id) c FROM service_support_optique WHERE support_type = 'lease'",
+            ),
+            (
+                "Party final",
+                f"SELECT COUNT(DISTINCT service_id) c FROM service_party WHERE {_party_role_query()}",
+            ),
         ]
         for label, sql in axes:
             try:
@@ -253,39 +330,59 @@ def compute_compact_scorecard(db_path: Path) -> str:
     con = sqlite3.connect(str(db_path))
     con.row_factory = sqlite3.Row
     try:
-        total = con.execute("SELECT COUNT(*) c FROM service_master_active").fetchone()["c"]
+        total = con.execute("SELECT COUNT(*) c FROM service_master_active").fetchone()[
+            "c"
+        ]
         has_agent = con.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_resolutions'"
         ).fetchone()
         if not has_agent:
             return f"SCORECARD: {total} svc | resolved=0 (0%) | remaining={total} | proposed=0 | high=0 med=0 low=0 | party_gaps=0"
 
-        resolved = con.execute("SELECT COUNT(*) c FROM agent_resolutions").fetchone()["c"]
+        resolved = con.execute(
+            _latest_agent_resolutions_cte() + "SELECT COUNT(*) c FROM latest_agent"
+        ).fetchone()["c"]
         proposed = con.execute(
-            "SELECT COUNT(*) c FROM agent_resolutions WHERE status = 'proposed'"
+            _latest_agent_resolutions_cte()
+            + "SELECT COUNT(*) c FROM latest_agent WHERE status = 'proposed'"
         ).fetchone()["c"]
         high = con.execute(
-            "SELECT COUNT(*) c FROM agent_resolutions WHERE confidence = 'high'"
+            _latest_agent_resolutions_cte()
+            + "SELECT COUNT(*) c FROM latest_agent WHERE confidence = 'high'"
         ).fetchone()["c"]
         medium = con.execute(
-            "SELECT COUNT(*) c FROM agent_resolutions WHERE confidence = 'medium'"
+            _latest_agent_resolutions_cte()
+            + "SELECT COUNT(*) c FROM latest_agent WHERE confidence = 'medium'"
         ).fetchone()["c"]
         low = con.execute(
-            "SELECT COUNT(*) c FROM agent_resolutions WHERE confidence = 'low'"
+            _latest_agent_resolutions_cte()
+            + "SELECT COUNT(*) c FROM latest_agent WHERE confidence = 'low'"
         ).fetchone()["c"]
         party_gaps = con.execute(
-            """
-            SELECT COUNT(*) c
-            FROM agent_resolutions
-            WHERE party_final_id IS NULL OR TRIM(party_final_id) = ''
-            """
+            _latest_agent_resolutions_cte()
+            + "SELECT COUNT(*) c FROM latest_agent WHERE party_final_id IS NULL OR TRIM(party_final_id) = ''"
         ).fetchone()["c"]
+        north_star = con.execute(
+            _latest_agent_resolutions_cte()
+            + """
+            SELECT
+                SUM(CASE WHEN s.nature_service = 'Lan To Lan' THEN 1 ELSE 0 END) AS l2l_total,
+                SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> '' THEN 1 ELSE 0 END) AS l2l_route,
+                SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.network_vlan_id IS NOT NULL AND TRIM(la.network_vlan_id) <> '' THEN 1 ELSE 0 END) AS l2l_vlan,
+                SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') THEN 1 ELSE 0 END) AS fon_total,
+                SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') AND la.route_ref IS NOT NULL AND TRIM(la.route_ref) <> '' THEN 1 ELSE 0 END) AS fon_route
+            FROM latest_agent la
+            JOIN service_master_active s ON s.service_id = la.service_id
+            """
+        ).fetchone()
         remaining = max(total - resolved, 0)
         coverage = (resolved / total * 100.0) if total else 0.0
         return (
             f"SCORECARD: {total} svc | resolved={resolved} ({coverage:.0f}%) | "
             f"remaining={remaining} | proposed={proposed} | "
-            f"high={high} med={medium} low={low} | party_gaps={party_gaps}"
+            f"high={high} med={medium} low={low} | party_gaps={party_gaps} | "
+            f"L2L route={north_star['l2l_route']}/{north_star['l2l_total']} vlan={north_star['l2l_vlan']}/{north_star['l2l_total']} | "
+            f"FON route={north_star['fon_route']}/{north_star['fon_total']}"
         )
     finally:
         con.close()
@@ -316,7 +413,9 @@ def _focus_nature(con: sqlite3.Connection, nature: str) -> list[str]:
     ).fetchall()
     lines.append(f" {len(services)} services nature contenant '{nature}':")
     for s in services:
-        lines.append(f"   {s['service_id']} | {s['principal_client']} | {s['principal_offer'] or '-'}")
+        lines.append(
+            f"   {s['service_id']} | {s['principal_client']} | {s['principal_offer'] or '-'}"
+        )
     return lines
 
 
@@ -343,7 +442,9 @@ def _focus_unresolved(con: sqlite3.Connection) -> list[str]:
 
     lines.append(f" {len(unresolved)} services non resolus (max 50):")
     for s in unresolved:
-        lines.append(f"   {s['service_id']} | {s['principal_client']} | {s['nature_service']}")
+        lines.append(
+            f"   {s['service_id']} | {s['principal_client']} | {s['nature_service']}"
+        )
     return lines
 
 
@@ -468,7 +569,9 @@ async def get_review_queue_summary(args: dict[str, Any]) -> dict[str, Any]:
         ]
         total = 0
         for r in rows:
-            lines.append(f"{r['nature_service']} | {r['principal_client']} | {r['review_type']} | {r['cnt']}")
+            lines.append(
+                f"{r['nature_service']} | {r['principal_client']} | {r['review_type']} | {r['cnt']}"
+            )
             total += r["cnt"]
 
         return _text(

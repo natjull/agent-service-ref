@@ -55,6 +55,7 @@ from .tools.db_tools import (
     resolve_optical_candidates,
     resolve_party_candidates,
     resolve_spatial_candidates,
+    hunt_site_anchor,
     hunt_vlan,
     hunt_route,
     get_co_cluster,
@@ -90,6 +91,7 @@ def create_service_ref_server():
             resolve_party_candidates,
             resolve_spatial_candidates,
             # Hunt tools (chasse attributs cibles)
+            hunt_site_anchor,
             hunt_vlan,
             hunt_route,
             get_co_cluster,
@@ -153,7 +155,9 @@ def create_agent_options(
         system_prompt=system_prompt,
         mcp_servers={"service-ref": server},
         allowed_tools=[
-            "Read", "Glob", "Grep",
+            "Read",
+            "Glob",
+            "Grep",
             "mcp__service-ref__query_db",
             "mcp__service-ref__list_tables",
             "mcp__service-ref__describe_table",
@@ -164,6 +168,10 @@ def create_agent_options(
             "mcp__service-ref__resolve_network_candidates",
             "mcp__service-ref__resolve_party_candidates",
             "mcp__service-ref__resolve_spatial_candidates",
+            "mcp__service-ref__hunt_site_anchor",
+            "mcp__service-ref__hunt_vlan",
+            "mcp__service-ref__hunt_route",
+            "mcp__service-ref__get_co_cluster",
             "mcp__service-ref__search_configs",
             "mcp__service-ref__read_config_file",
             "mcp__service-ref__submit_resolution",
@@ -175,10 +183,13 @@ def create_agent_options(
         ],
         disallowed_tools=[
             "Bash",
-            "Write", "Edit",
+            "Write",
+            "Edit",
             "AskUserQuestion",
-            "EnterPlanMode", "ExitPlanMode",
-            "WebSearch", "WebFetch",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "WebSearch",
+            "WebFetch",
         ],
         model=model,
         agents={
@@ -271,7 +282,9 @@ async def _process_stream(
     stream = client.receive_messages().__aiter__()
     while True:
         try:
-            message = await asyncio.wait_for(stream.__anext__(), timeout=_STREAM_TIMEOUT)
+            message = await asyncio.wait_for(
+                stream.__anext__(), timeout=_STREAM_TIMEOUT
+            )
         except StopAsyncIteration:
             break
         except asyncio.TimeoutError:
@@ -359,13 +372,15 @@ async def interactive_session(workspace: str = ".", model: str = "opus"):
     """Run the agent in interactive conversation mode."""
     options = create_agent_options(workspace=workspace, model=model)
 
-    console.print(Panel(
-        "[bold]Agent Service-Ref v0.1.0[/bold]\n"
-        f"Espace de travail : [dim]{workspace}[/dim]\n"
-        f"Modele : [dim]{model}[/dim]\n"
-        "Tapez [bold]quit[/bold] pour quitter.",
-        border_style="cyan",
-    ))
+    console.print(
+        Panel(
+            "[bold]Agent Service-Ref v0.1.0[/bold]\n"
+            f"Espace de travail : [dim]{workspace}[/dim]\n"
+            f"Modele : [dim]{model}[/dim]\n"
+            "Tapez [bold]quit[/bold] pour quitter.",
+            border_style="cyan",
+        )
+    )
 
     async with ClaudeSDKClient(options=options) as client:
         next_query: str | None = None
@@ -407,10 +422,12 @@ def _flush_text(buffer: list[str], target_console: Console | None = None) -> Non
         return
     c = target_console or console
     c.print()
-    c.print(Panel(
-        Markdown(text),
-        title="[bold cyan]Agent[/bold cyan]",
-        title_align="left",
-        border_style="cyan",
-        padding=(1, 2),
-    ))
+    c.print(
+        Panel(
+            Markdown(text),
+            title="[bold cyan]Agent[/bold cyan]",
+            title_align="left",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )

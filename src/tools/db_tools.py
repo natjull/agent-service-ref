@@ -136,7 +136,9 @@ def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str,
             """,
             (service_id,),
         ).fetchall()
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_spatial_seed'").fetchone()
+        if con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_spatial_seed'"
+        ).fetchone()
         else []
     )
     spatial_evidence_rows = (
@@ -151,7 +153,9 @@ def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str,
             """,
             (service_id,),
         ).fetchall()
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_spatial_evidence'").fetchone()
+        if con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_spatial_evidence'"
+        ).fetchone()
         else []
     )
     lea_signal_rows = (
@@ -164,7 +168,9 @@ def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str,
             """,
             (service_id,),
         ).fetchall()
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_lea_signal'").fetchone()
+        if con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_lea_signal'"
+        ).fetchone()
         else []
     )
 
@@ -187,7 +193,9 @@ def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str,
                 "review_type": row["review_type"],
                 "severity": row["severity"],
                 "reason": row["reason"],
-                "context": json.loads(row["context_json"]) if row["context_json"] else None,
+                "context": json.loads(row["context_json"])
+                if row["context_json"]
+                else None,
             }
             for row in review_items
         ],
@@ -198,7 +206,9 @@ def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str,
                 "score": row["score"],
                 "source_table": row["source_table"],
                 "source_key": row["source_key"],
-                "payload": json.loads(row["payload_json"]) if row["payload_json"] else None,
+                "payload": json.loads(row["payload_json"])
+                if row["payload_json"]
+                else None,
             }
             for row in evidences
         ],
@@ -211,7 +221,9 @@ def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str,
         "spatial_evidence_rows": [
             {
                 **_row_to_dict(row),
-                "context": json.loads(row["context_json"]) if row["context_json"] else None,
+                "context": json.loads(row["context_json"])
+                if row["context_json"]
+                else None,
             }
             for row in spatial_evidence_rows
         ],
@@ -219,7 +231,9 @@ def _fetch_service_bundle(con: sqlite3.Connection, service_id: str) -> dict[str,
     }
 
 
-def _resolve_party_candidates(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+def _resolve_party_candidates(
+    con: sqlite3.Connection, service_id: str
+) -> dict[str, Any]:
     service = con.execute(
         """
         SELECT service_id, principal_client, client_final
@@ -307,32 +321,69 @@ def _resolve_party_candidates(con: sqlite3.Connection, service_id: str) -> dict[
     }
 
 
-def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+def _resolve_optical_candidates(
+    con: sqlite3.Connection, service_id: str
+) -> dict[str, Any]:
     gold_cols = {
-        row["name"] for row in con.execute('PRAGMA table_info("gold_service_active")').fetchall()
+        row["name"]
+        for row in con.execute('PRAGMA table_info("gold_service_active")').fetchall()
     }
     optical_cols = {
-        row["name"] for row in con.execute('PRAGMA table_info("service_support_optique")').fetchall()
+        row["name"]
+        for row in con.execute(
+            'PRAGMA table_info("service_support_optique")'
+        ).fetchall()
     }
-    gold_select = [col for col in ("route_ref", "route_id", "lease_id", "fiber_lease_id", "isp_lease_id") if col in gold_cols]
+    gold_select = [
+        col
+        for col in (
+            "route_ref",
+            "route_id",
+            "lease_id",
+            "fiber_lease_id",
+            "isp_lease_id",
+        )
+        if col in gold_cols
+    ]
     optical_select = [
         col
         for col in (
-            "route_ref", "route_id", "route_match_rule", "route_score",
-            "lease_ref", "lease_id", "lease_match_rule", "lease_score",
-            "fiber_lease_id", "fiber_lease_match_rule", "fiber_lease_score",
-            "isp_lease_id", "isp_lease_match_rule", "isp_lease_score", "support_type", "support_ref",
-            "logical_route_id", "cable_id", "cable_match_rule", "cable_score",
-            "housing_id", "housing_match_rule", "housing_score",
-            "site_a_optical_id", "site_z_optical_id", "optical_context_json",
-            "spatial_match_rule", "spatial_distance_meters", "spatial_score",
+            "route_ref",
+            "route_id",
+            "route_match_rule",
+            "route_score",
+            "lease_ref",
+            "lease_id",
+            "lease_match_rule",
+            "lease_score",
+            "fiber_lease_id",
+            "fiber_lease_match_rule",
+            "fiber_lease_score",
+            "isp_lease_id",
+            "isp_lease_match_rule",
+            "isp_lease_score",
+            "support_type",
+            "support_ref",
+            "logical_route_id",
+            "cable_id",
+            "cable_match_rule",
+            "cable_score",
+            "housing_id",
+            "housing_match_rule",
+            "housing_score",
+            "site_a_optical_id",
+            "site_z_optical_id",
+            "optical_context_json",
+            "spatial_match_rule",
+            "spatial_distance_meters",
+            "spatial_score",
         )
         if col in optical_cols
     ]
 
     gold_row = (
         con.execute(
-            f'SELECT {", ".join(gold_select)} FROM gold_service_active WHERE service_id = ?',
+            f"SELECT {', '.join(gold_select)} FROM gold_service_active WHERE service_id = ?",
             (service_id,),
         ).fetchone()
         if gold_select
@@ -340,7 +391,7 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
     )
     support_rows = (
         con.execute(
-            f'SELECT {", ".join(optical_select)} FROM service_support_optique WHERE service_id = ?',
+            f"SELECT {', '.join(optical_select)} FROM service_support_optique WHERE service_id = ?",
             (service_id,),
         ).fetchall()
         if optical_select
@@ -361,7 +412,9 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
             (service_id,),
         ).fetchall()
         if _row_to_dict(
-            con.execute("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_logical_route'").fetchone()
+            con.execute(
+                "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_logical_route'"
+            ).fetchone()
         )
         else []
     )
@@ -385,7 +438,9 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
             (service_id, service_id, service_id),
         ).fetchall()
         if _row_to_dict(
-            con.execute("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_lease_endpoint'").fetchone()
+            con.execute(
+                "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_lease_endpoint'"
+            ).fetchone()
         )
         else []
     )
@@ -403,7 +458,9 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
             (service_id,),
         ).fetchall()
         if _row_to_dict(
-            con.execute("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_cable'").fetchone()
+            con.execute(
+                "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_cable'"
+            ).fetchone()
         )
         else []
     )
@@ -421,14 +478,18 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
             (service_id,),
         ).fetchall()
         if _row_to_dict(
-            con.execute("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_housing'").fetchone()
+            con.execute(
+                "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_housing'"
+            ).fetchone()
         )
         else []
     )
     # Search cables by site tokens matching service endpoints A/Z
     nearby_cables: list[dict[str, Any]] = []
     has_cable_table = _row_to_dict(
-        con.execute("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_cable'").fetchone()
+        con.execute(
+            "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_optical_cable'"
+        ).fetchone()
     )
     if has_cable_table:
         endpoint_sites = con.execute(
@@ -440,11 +501,26 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
             name = (row["matched_site_name"] or "").upper()
             for token in re.split(r"[^A-Z0-9]+", name):
                 if len(token) >= 4 and token not in {
-                    "SITE", "POP", "NRA", "TELOISE", "FRANCE", "NORD", "SUD", "EST", "OUEST",
-                    "SAINT", "COMMUNE", "VILLE", "MAIRIE", "AGENCE", "HOTEL",
+                    "SITE",
+                    "POP",
+                    "NRA",
+                    "TELOISE",
+                    "FRANCE",
+                    "NORD",
+                    "SUD",
+                    "EST",
+                    "OUEST",
+                    "SAINT",
+                    "COMMUNE",
+                    "VILLE",
+                    "MAIRIE",
+                    "AGENCE",
+                    "HOTEL",
                 }:
                     site_tokens.append(token)
-        matched_cable_ids = {r["cable_id"] for r in cable_candidates} if cable_candidates else set()
+        matched_cable_ids = (
+            {r["cable_id"] for r in cable_candidates} if cable_candidates else set()
+        )
         for token in dict.fromkeys(site_tokens):  # deduplicate preserving order
             if len(nearby_cables) >= 10:
                 break
@@ -461,7 +537,9 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
     # Route parcours: routes passing through the service's resolved sites
     route_parcours: list[dict[str, Any]] = []
     has_parcours_table = _row_to_dict(
-        con.execute("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_route_parcours'").fetchone()
+        con.execute(
+            "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ref_route_parcours'"
+        ).fetchone()
     )
     if has_parcours_table and site_tokens:
         seen_route_refs: set[str] = set()
@@ -483,7 +561,9 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
     return {
         "service_id": service_id,
         "gold_optical": _row_to_dict(gold_row),
-        "pipeline_hints": _rows_to_dicts(support_rows),  # candidats pipeline (hints, pas verites)
+        "pipeline_hints": _rows_to_dicts(
+            support_rows
+        ),  # candidats pipeline (hints, pas verites)
         "logical_routes": _rows_to_dicts(logical_routes),
         "lease_endpoints": _rows_to_dicts(lease_endpoints),
         "cable_candidates": _rows_to_dicts(cable_candidates),
@@ -493,14 +573,69 @@ def _resolve_optical_candidates(con: sqlite3.Connection, service_id: str) -> dic
     }
 
 
-def _resolve_network_candidates(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+def _resolve_network_candidates(
+    con: sqlite3.Connection, service_id: str
+) -> dict[str, Any]:
     # 1. Gold et hints pipeline (service_support_reseau apres Phase 2.1 = multi-VLAN)
-    gold_cols = {row["name"] for row in con.execute('PRAGMA table_info("gold_service_active")').fetchall()}
-    network_cols = {row["name"] for row in con.execute('PRAGMA table_info("service_support_reseau")').fetchall()}
-    gold_select = [col for col in ("interface_id", "network_interface_id", "network_vlan_id", "cpe_id", "config_id", "inferred_vlans_json") if col in gold_cols]
-    network_select = [col for col in ("service_ref", "interface_id", "interface_match_rule", "interface_score", "network_interface_id", "network_interface_match_rule", "network_interface_score", "network_vlan_id", "network_vlan_match_rule", "network_vlan_score", "cpe_id", "cpe_match_rule", "cpe_score", "config_id", "config_match_rule", "config_score", "inferred_vlans_json") if col in network_cols]
-    gold_row = con.execute(f'SELECT {", ".join(gold_select)} FROM gold_service_active WHERE service_id = ?', (service_id,)).fetchone() if gold_select else None
-    support_rows = con.execute(f'SELECT {", ".join(network_select)} FROM service_support_reseau WHERE service_id = ?', (service_id,)).fetchall() if network_select else []
+    gold_cols = {
+        row["name"]
+        for row in con.execute('PRAGMA table_info("gold_service_active")').fetchall()
+    }
+    network_cols = {
+        row["name"]
+        for row in con.execute('PRAGMA table_info("service_support_reseau")').fetchall()
+    }
+    gold_select = [
+        col
+        for col in (
+            "interface_id",
+            "network_interface_id",
+            "network_vlan_id",
+            "cpe_id",
+            "config_id",
+            "inferred_vlans_json",
+        )
+        if col in gold_cols
+    ]
+    network_select = [
+        col
+        for col in (
+            "service_ref",
+            "interface_id",
+            "interface_match_rule",
+            "interface_score",
+            "network_interface_id",
+            "network_interface_match_rule",
+            "network_interface_score",
+            "network_vlan_id",
+            "network_vlan_match_rule",
+            "network_vlan_score",
+            "cpe_id",
+            "cpe_match_rule",
+            "cpe_score",
+            "config_id",
+            "config_match_rule",
+            "config_score",
+            "inferred_vlans_json",
+        )
+        if col in network_cols
+    ]
+    gold_row = (
+        con.execute(
+            f"SELECT {', '.join(gold_select)} FROM gold_service_active WHERE service_id = ?",
+            (service_id,),
+        ).fetchone()
+        if gold_select
+        else None
+    )
+    support_rows = (
+        con.execute(
+            f"SELECT {', '.join(network_select)} FROM service_support_reseau WHERE service_id = ?",
+            (service_id,),
+        ).fetchall()
+        if network_select
+        else []
+    )
 
     payload: dict[str, Any] = {
         "service_id": service_id,
@@ -508,7 +643,9 @@ def _resolve_network_candidates(con: sqlite3.Connection, service_id: str) -> dic
         "network_candidates": _rows_to_dicts(support_rows),
     }
     if gold_row and gold_row["inferred_vlans_json"]:
-        payload["gold_network"]["inferred_vlans"] = json.loads(gold_row["inferred_vlans_json"])
+        payload["gold_network"]["inferred_vlans"] = json.loads(
+            gold_row["inferred_vlans_json"]
+        )
     for row in payload["network_candidates"]:
         if row.get("inferred_vlans_json"):
             row["inferred_vlans"] = json.loads(row["inferred_vlans_json"])
@@ -518,7 +655,18 @@ def _resolve_network_candidates(con: sqlite3.Connection, service_id: str) -> dic
         "SELECT client_final, endpoint_z_raw, endpoint_a_raw FROM service_master_active WHERE service_id = ?",
         (service_id,),
     ).fetchone()
-    _NOISE = {"SAINT", "ROUTE", "AVENUE", "FRANCE", "AGENCE", "COMPLETEL", "ADISTA", "HEXANET", "TELOISE", "TELECOM"}
+    _NOISE = {
+        "SAINT",
+        "ROUTE",
+        "AVENUE",
+        "FRANCE",
+        "AGENCE",
+        "COMPLETEL",
+        "ADISTA",
+        "HEXANET",
+        "TELOISE",
+        "TELECOM",
+    }
     client_tokens: list[str] = []
     if svc:
         for field in (svc["client_final"], svc["endpoint_z_raw"]):
@@ -618,7 +766,9 @@ def _resolve_network_candidates(con: sqlite3.Connection, service_id: str) -> dic
     return payload
 
 
-def _resolve_spatial_candidates(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+def _resolve_spatial_candidates(
+    con: sqlite3.Connection, service_id: str
+) -> dict[str, Any]:
     seeds = (
         con.execute(
             """
@@ -633,7 +783,9 @@ def _resolve_spatial_candidates(con: sqlite3.Connection, service_id: str) -> dic
             """,
             (service_id,),
         ).fetchall()
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_spatial_seed'").fetchone()
+        if con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_spatial_seed'"
+        ).fetchone()
         else []
     )
     evidences = (
@@ -649,30 +801,56 @@ def _resolve_spatial_candidates(con: sqlite3.Connection, service_id: str) -> dic
             """,
             (service_id,),
         ).fetchall()
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_spatial_evidence'").fetchone()
+        if con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_spatial_evidence'"
+        ).fetchone()
         else []
     )
     site_candidates = [row for row in evidences if row["target_table"] == "ref_sites"]
-    housing_candidates = [row for row in evidences if row["target_table"] == "ref_optical_housing"]
-    cable_candidates = [row for row in evidences if row["target_table"] == "ref_optical_cable"]
+    housing_candidates = [
+        row for row in evidences if row["target_table"] == "ref_optical_housing"
+    ]
+    cable_candidates = [
+        row for row in evidences if row["target_table"] == "ref_optical_cable"
+    ]
     best = evidences[0] if evidences else None
     return {
         "service_id": service_id,
         "spatial_seeds": _rows_to_dicts(seeds),
         "site_candidates": [
-            {**_row_to_dict(row), "context": json.loads(row["context_json"]) if row["context_json"] else None}
+            {
+                **_row_to_dict(row),
+                "context": json.loads(row["context_json"])
+                if row["context_json"]
+                else None,
+            }
             for row in site_candidates
         ],
         "housing_candidates": [
-            {**_row_to_dict(row), "context": json.loads(row["context_json"]) if row["context_json"] else None}
+            {
+                **_row_to_dict(row),
+                "context": json.loads(row["context_json"])
+                if row["context_json"]
+                else None,
+            }
             for row in housing_candidates
         ],
         "cable_candidates": [
-            {**_row_to_dict(row), "context": json.loads(row["context_json"]) if row["context_json"] else None}
+            {
+                **_row_to_dict(row),
+                "context": json.loads(row["context_json"])
+                if row["context_json"]
+                else None,
+            }
             for row in cable_candidates
         ],
         "best_spatial_evidence": (
-            {**_row_to_dict(best), "context": json.loads(best["context_json"]) if best and best["context_json"] else None}
+            {
+                **_row_to_dict(best),
+                "context": json.loads(best["context_json"])
+                if best and best["context_json"]
+                else None,
+            }
             if best is not None
             else None
         ),
@@ -685,7 +863,9 @@ def _resolve_spatial_candidates(con: sqlite3.Connection, service_id: str) -> dic
     }
 
 
-def _resolve_lea_signal_candidates(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+def _resolve_lea_signal_candidates(
+    con: sqlite3.Connection, service_id: str
+) -> dict[str, Any]:
     rows = (
         con.execute(
             """
@@ -696,7 +876,9 @@ def _resolve_lea_signal_candidates(con: sqlite3.Connection, service_id: str) -> 
             """,
             (service_id,),
         ).fetchall()
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_lea_signal'").fetchone()
+        if con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_lea_signal'"
+        ).fetchone()
         else []
     )
     payload_rows = _rows_to_dicts(rows)
@@ -707,10 +889,38 @@ def _resolve_lea_signal_candidates(con: sqlite3.Connection, service_id: str) -> 
             for row in payload_rows
         ],
         "classified_signals": payload_rows,
-        "recommended_address_signals": [row for row in payload_rows if row["signal_kind"] in {"postal_address_precise", "mixed_site_address", "postal_address_partial", "postcode_city", "city_only"}][:5],
-        "recommended_site_signals": [row for row in payload_rows if row["signal_kind"] in {"technical_site_anchor", "site_label_business", "mixed_site_address", "postal_address_precise", "postal_address_partial"}][:5],
-        "recommended_technical_signals": [row for row in payload_rows if row["signal_kind"] == "technical_site_anchor"][:5],
-        "recommended_route_signals": [row for row in payload_rows if row["signal_kind"] == "route_or_service_reference"][:5],
+        "recommended_address_signals": [
+            row
+            for row in payload_rows
+            if row["signal_kind"]
+            in {
+                "postal_address_precise",
+                "mixed_site_address",
+                "postal_address_partial",
+                "postcode_city",
+                "city_only",
+            }
+        ][:5],
+        "recommended_site_signals": [
+            row
+            for row in payload_rows
+            if row["signal_kind"]
+            in {
+                "technical_site_anchor",
+                "site_label_business",
+                "mixed_site_address",
+                "postal_address_precise",
+                "postal_address_partial",
+            }
+        ][:5],
+        "recommended_technical_signals": [
+            row for row in payload_rows if row["signal_kind"] == "technical_site_anchor"
+        ][:5],
+        "recommended_route_signals": [
+            row
+            for row in payload_rows
+            if row["signal_kind"] == "route_or_service_reference"
+        ][:5],
         "noise_signals": [row for row in payload_rows if row["is_noise"]][:5],
         "reasoning_summary": (
             f"{len(payload_rows)} LEA signals classified; top="
@@ -763,7 +973,9 @@ async def query_db(args: dict[str, Any]) -> dict[str, Any]:
 
         result = "\n".join(lines)
         if truncated:
-            result += f"\n\n... (truncated at {_MAX_ROWS} rows, add LIMIT to your query)"
+            result += (
+                f"\n\n... (truncated at {_MAX_ROWS} rows, add LIMIT to your query)"
+            )
         return _text(result)
     except Exception as e:
         return _text(f"SQL ERROR: {e}")
@@ -809,7 +1021,9 @@ async def describe_table(args: dict[str, Any]) -> dict[str, Any]:
         return _text("ERROR: No table_name provided.")
 
     if not re.match(r"^[A-Za-z0-9_]+$", table_name):
-        return _text(f"ERROR: invalid table name '{table_name}' (only alphanumeric and _ allowed).")
+        return _text(
+            f"ERROR: invalid table name '{table_name}' (only alphanumeric and _ allowed)."
+        )
 
     con = _connect()
     try:
@@ -853,15 +1067,15 @@ async def describe_table(args: dict[str, Any]) -> dict[str, Any]:
                     f'SELECT DISTINCT "{col_name}" FROM "{table_name}" '
                     f'WHERE "{col_name}" IS NOT NULL LIMIT 5'
                 ).fetchall()
-                sample_str = ", ".join(
-                    str(s[0])[:40] for s in samples
-                )
+                sample_str = ", ".join(str(s[0])[:40] for s in samples)
             except Exception:
                 nulls = "?"
                 distinct = "?"
                 sample_str = ""
 
-            lines.append(f"{col_name} | {col_type} | {nulls} | {distinct} | {sample_str}")
+            lines.append(
+                f"{col_name} | {col_type} | {nulls} | {distinct} | {sample_str}"
+            )
 
         return _text("\n".join(lines))
     finally:
@@ -1099,9 +1313,26 @@ def _extract_service_refs(*values: object) -> list[str]:
 
 def _extract_client_tokens(*values: object) -> list[str]:
     noise = {
-        "SAINT", "ROUTE", "AVENUE", "FRANCE", "AGENCE", "COMPLETEL", "ADISTA",
-        "HEXANET", "TELOISE", "TELECOM", "CLIENT", "RESEAU", "SERVICE", "TECHNIQUE",
-        "CENTRE", "HOSPITALIER", "VILLE", "COMMUNE", "SOCIETE", "ASSOCIATION",
+        "SAINT",
+        "ROUTE",
+        "AVENUE",
+        "FRANCE",
+        "AGENCE",
+        "COMPLETEL",
+        "ADISTA",
+        "HEXANET",
+        "TELOISE",
+        "TELECOM",
+        "CLIENT",
+        "RESEAU",
+        "SERVICE",
+        "TECHNIQUE",
+        "CENTRE",
+        "HOSPITALIER",
+        "VILLE",
+        "COMMUNE",
+        "SOCIETE",
+        "ASSOCIATION",
     }
     tokens: list[str] = []
     seen: set[str] = set()
@@ -1129,7 +1360,11 @@ def _extract_vlan_ids(*values: object) -> list[str]:
     for value in values:
         for item in _json_array(value):
             candidate = str(item or "").strip()
-            if candidate.isdigit() and 2 <= len(candidate) <= 4 and candidate not in seen:
+            if (
+                candidate.isdigit()
+                and 2 <= len(candidate) <= 4
+                and candidate not in seen
+            ):
                 seen.add(candidate)
                 vlan_ids.append(candidate)
         text = str(value or "")
@@ -1180,7 +1415,10 @@ def _lookup_vlan_rows(
             row_dict = _row_to_dict(row)
             if row_dict is None:
                 continue
-            key = row_dict.get("network_vlan_id") or f"{row_dict.get('device_name')}:{row_dict.get('vlan_id')}"
+            key = (
+                row_dict.get("network_vlan_id")
+                or f"{row_dict.get('device_name')}:{row_dict.get('vlan_id')}"
+            )
             if key in seen:
                 continue
             seen.add(str(key))
@@ -1230,7 +1468,11 @@ def _add_vlan_hypothesis(
     proof_level: str,
     extra: dict[str, Any] | None = None,
 ) -> None:
-    key = (str(candidate_vlan_id or ""), str(candidate_device or ""), str(network_vlan_id or ""))
+    key = (
+        str(candidate_vlan_id or ""),
+        str(candidate_device or ""),
+        str(network_vlan_id or ""),
+    )
     existing = hypothesis_index.get(key)
     if existing is None:
         payload = {
@@ -1248,9 +1490,15 @@ def _add_vlan_hypothesis(
         hypothesis_index[key] = payload
         return
 
-    existing["evidence_for"] = list(dict.fromkeys(existing["evidence_for"] + evidence_for))
-    existing["evidence_against"] = list(dict.fromkeys(existing["evidence_against"] + evidence_against))
-    if _VLAN_LEVEL_ORDER.get(proof_level, 99) < _VLAN_LEVEL_ORDER.get(existing.get("proof_level", "weak"), 99):
+    existing["evidence_for"] = list(
+        dict.fromkeys(existing["evidence_for"] + evidence_for)
+    )
+    existing["evidence_against"] = list(
+        dict.fromkeys(existing["evidence_against"] + evidence_against)
+    )
+    if _VLAN_LEVEL_ORDER.get(proof_level, 99) < _VLAN_LEVEL_ORDER.get(
+        existing.get("proof_level", "weak"), 99
+    ):
         existing["proof_level"] = proof_level
     if source not in str(existing.get("source") or ""):
         existing["source"] = f"{existing['source']}+{source}"
@@ -1258,6 +1506,160 @@ def _add_vlan_hypothesis(
         for extra_key, extra_value in extra.items():
             if existing.get(extra_key) in (None, "", []):
                 existing[extra_key] = extra_value
+
+
+def _build_site_anchor(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
+    service = con.execute(
+        """SELECT service_id, nature_service, principal_client, client_final,
+                  principal_external_ref, service_refs_json, endpoint_a_raw, endpoint_z_raw
+           FROM service_master_active WHERE service_id = ?""",
+        (service_id,),
+    ).fetchone()
+    if not service:
+        return {"error": f"service_id '{service_id}' not found"}
+
+    endpoints = con.execute(
+        """SELECT endpoint_label, raw_value, matched_site_id, matched_site_name, score, rule_name,
+                  spatial_score, spatial_distance_meters, spatial_rule, spatial_adjusted_score
+           FROM service_endpoint WHERE service_id = ? ORDER BY endpoint_label""",
+        (service_id,),
+    ).fetchall()
+    seeds = con.execute(
+        """SELECT seed_type, raw_value, city_hint, postcode_hint, match_rule, match_score,
+                  x_l93, y_l93, source_table, source_column
+           FROM service_spatial_seed
+           WHERE service_id = ?
+           ORDER BY seed_priority, match_score DESC
+           LIMIT 8""",
+        (service_id,),
+    ).fetchall()
+    spatial = con.execute(
+        """SELECT evidence_type, seed_type, target_table, target_id, distance_meters,
+                  score, rule_name, adjusted_score, context_json
+           FROM service_spatial_evidence
+           WHERE service_id = ?
+           ORDER BY adjusted_score DESC, score DESC, distance_meters ASC
+           LIMIT 10""",
+        (service_id,),
+    ).fetchall()
+
+    route_refs: list[str] = []
+    for sig in con.execute(
+        "SELECT route_refs_json FROM service_lea_signal WHERE service_id = ? AND route_refs_json IS NOT NULL",
+        (service_id,),
+    ).fetchall():
+        route_refs.extend(
+            [
+                str(ref).strip()
+                for ref in _json_array(sig["route_refs_json"])
+                if str(ref or "").strip()
+            ]
+        )
+
+    network_hint_counts = con.execute(
+        """SELECT
+                SUM(CASE WHEN network_vlan_id IS NOT NULL AND TRIM(network_vlan_id) <> '' THEN 1 ELSE 0 END) AS vlan_rows,
+                SUM(CASE WHEN network_interface_id IS NOT NULL AND TRIM(network_interface_id) <> '' THEN 1 ELSE 0 END) AS iface_rows,
+                SUM(CASE WHEN cpe_id IS NOT NULL AND TRIM(cpe_id) <> '' THEN 1 ELSE 0 END) AS cpe_rows
+           FROM service_support_reseau WHERE service_id = ?""",
+        (service_id,),
+    ).fetchone()
+
+    site_assets: list[dict[str, Any]] = []
+    site_ids = []
+    for row in endpoints:
+        if row["matched_site_id"] and row["matched_site_id"] not in site_ids:
+            site_ids.append(row["matched_site_id"])
+    for site_id in site_ids:
+        site_ref = con.execute(
+            "SELECT reference FROM ref_sites WHERE site_id = ?",
+            (site_id,),
+        ).fetchone()
+        housing_count = con.execute(
+            "SELECT COUNT(*) AS c FROM ref_optical_housing WHERE site_id = ?",
+            (site_id,),
+        ).fetchone()["c"]
+        lease_count = con.execute(
+            "SELECT COUNT(DISTINCT optical_lease_id) AS c FROM ref_optical_lease_endpoint WHERE site_id = ?",
+            (site_id,),
+        ).fetchone()["c"]
+        site_assets.append(
+            {
+                "site_id": site_id,
+                "site_reference": site_ref["reference"] if site_ref else None,
+                "housing_count": housing_count,
+                "lease_endpoint_count": lease_count,
+            }
+        )
+
+    matched_scores = [
+        int(row["score"] or 0) for row in endpoints if row["matched_site_id"]
+    ]
+    best_site_score = max(matched_scores) if matched_scores else 0
+    distinct_sites = {
+        row["matched_site_id"] for row in endpoints if row["matched_site_id"]
+    }
+    has_distinct_pair = len(distinct_sites) >= 2
+    device_prefixes = _infer_device_prefixes(
+        service["endpoint_a_raw"],
+        service["endpoint_z_raw"],
+        *(row["matched_site_name"] for row in endpoints),
+    )
+
+    if route_refs:
+        recommended_entry_point = "route_ref_first"
+        rationale = "route_refs_json LEA present - start by validating route_ref in GDB/leases, then confirm topology"
+    elif has_distinct_pair and best_site_score >= 60:
+        recommended_entry_point = "site_gdb_first"
+        rationale = "distinct site anchors available - start from site GDB then passive topology"
+    elif best_site_score >= 60:
+        recommended_entry_point = "site_then_network"
+        rationale = "single credible site anchor - start from GDB site, then use network evidence to disambiguate"
+    elif (
+        (network_hint_counts["vlan_rows"] or 0)
+        or (network_hint_counts["iface_rows"] or 0)
+        or (network_hint_counts["cpe_rows"] or 0)
+    ):
+        recommended_entry_point = "network_anchor_first"
+        rationale = "site anchor weak - start from network hints (service refs, CPE, interfaces), then reconcile to topology"
+    elif spatial:
+        recommended_entry_point = "site_spatial_first"
+        rationale = "no reliable matched site - start from spatial evidence and nearby GDB sites"
+    else:
+        recommended_entry_point = "manual_broad_exploration"
+        rationale = (
+            "no strong anchor - explore LEA, party, spatial and network in parallel"
+        )
+
+    site_anchor_quality = (
+        "high"
+        if has_distinct_pair and best_site_score >= 70
+        else "medium"
+        if best_site_score >= 50
+        else "low"
+    )
+
+    return {
+        "service_id": service_id,
+        "nature_service": service["nature_service"],
+        "principal_client": service["principal_client"],
+        "client_final": service["client_final"],
+        "endpoint_a_raw": service["endpoint_a_raw"],
+        "endpoint_z_raw": service["endpoint_z_raw"],
+        "route_refs_in_lea": route_refs,
+        "service_refs_in_lea": _extract_service_refs(
+            service["service_refs_json"], service["principal_external_ref"]
+        ),
+        "endpoints": _rows_to_dicts(endpoints),
+        "spatial_seeds": _rows_to_dicts(seeds),
+        "spatial_evidence": _rows_to_dicts(spatial),
+        "site_assets": site_assets,
+        "network_hint_counts": dict(network_hint_counts) if network_hint_counts else {},
+        "device_prefix_hints": device_prefixes,
+        "site_anchor_quality": site_anchor_quality,
+        "recommended_entry_point": recommended_entry_point,
+        "recommended_rationale": rationale,
+    }
 
 
 def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
@@ -1280,7 +1682,9 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
     hypotheses: list[dict[str, Any]] = []
     hypothesis_index: dict[tuple[str, str, str], dict[str, Any]] = {}
     data_explored: list[str] = []
-    service_refs = _extract_service_refs(svc["service_refs_json"], svc["principal_external_ref"])
+    service_refs = _extract_service_refs(
+        svc["service_refs_json"], svc["principal_external_ref"]
+    )
     client_tokens = _extract_client_tokens(
         svc["client_final"],
         svc["principal_client"],
@@ -1304,7 +1708,9 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
 
     # --- Source 1 : ancre TOIP via xconnect_circuit_id [strong] ---
     # route_refs_json contient "TOIP 2079" -> xconnect_circuit_id stocke "2079"
-    data_explored.append("service_lea_signal.route_refs_json -> ref_co_subinterface.xconnect_circuit_id")
+    data_explored.append(
+        "service_lea_signal.route_refs_json -> ref_co_subinterface.xconnect_circuit_id"
+    )
     toip_refs: list[str] = []
     for sig in con.execute(
         "SELECT route_refs_json FROM service_lea_signal WHERE service_id = ? AND route_refs_json IS NOT NULL",
@@ -1344,8 +1750,11 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                         evidence_for=[
                             f"xconnect_circuit_id={r['xconnect_circuit_id']} sur {r['device_name']} {r['interface_name']}",
                             f"LEA route_ref: {raw_ref}",
-                        ] + ([f"site_code={r['site_code']}"] if r["site_code"] else []),
-                        evidence_against=[f"label client absent dans ref_network_vlans pour vlan_id={vlan_key}"],
+                        ]
+                        + ([f"site_code={r['site_code']}"] if r["site_code"] else []),
+                        evidence_against=[
+                            f"label client absent dans ref_network_vlans pour vlan_id={vlan_key}"
+                        ],
                         proof_level="medium",
                         extra={
                             "co_interface": r["interface_name"],
@@ -1359,15 +1768,19 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                         hypotheses,
                         hypothesis_index,
                         candidate_vlan_id=vlan_key,
-                        candidate_device=vlan_row.get("device_name") or r["device_name"],
+                        candidate_device=vlan_row.get("device_name")
+                        or r["device_name"],
                         source="toip_xconnect",
                         network_vlan_id=vlan_row.get("network_vlan_id"),
                         evidence_for=[
                             f"xconnect_circuit_id={r['xconnect_circuit_id']} sur {r['device_name']} {r['interface_name']}",
                             f"LEA route_ref: {raw_ref}",
                             f"vlan_id={vlan_key} retrouve sur {vlan_row.get('device_name')}",
-                        ] + ([f"site_code={r['site_code']}"] if r["site_code"] else []),
-                        evidence_against=[] if vlan_row.get("label") else [
+                        ]
+                        + ([f"site_code={r['site_code']}"] if r["site_code"] else []),
+                        evidence_against=[]
+                        if vlan_row.get("label")
+                        else [
                             f"label client absent sur {vlan_row.get('device_name')} vlan_id={vlan_key}"
                         ],
                         proof_level="strong" if vlan_row.get("label") else "medium",
@@ -1384,7 +1797,7 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
             for row in con.execute(
                 "SELECT device_name, interface_name, description, vlan_ids_json "
                 "FROM ref_network_interfaces WHERE service_refs_json LIKE ? OR UPPER(description) LIKE ? LIMIT 12",
-                (f'%{service_ref}%', f'%{service_ref}%'),
+                (f"%{service_ref}%", f"%{service_ref}%"),
             ).fetchall():
                 vlan_ids = _extract_vlan_ids(row["vlan_ids_json"], row["description"])
                 for vlan_key in vlan_ids[:4]:
@@ -1400,17 +1813,20 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                                 hypotheses,
                                 hypothesis_index,
                                 candidate_vlan_id=vlan_key,
-                                candidate_device=vlan_row.get("device_name") or row["device_name"],
+                                candidate_device=vlan_row.get("device_name")
+                                or row["device_name"],
                                 source="service_ref_interface",
                                 network_vlan_id=vlan_row.get("network_vlan_id"),
                                 evidence_for=[
                                     f"description interface contient {service_ref}",
                                     f"interface {row['device_name']} {row['interface_name']}",
                                 ],
-                                evidence_against=[] if vlan_row.get("label") else [
-                                    "VLAN retrouve sans label client explicite"
-                                ],
-                                proof_level="strong" if vlan_row.get("label") else "medium",
+                                evidence_against=[]
+                                if vlan_row.get("label")
+                                else ["VLAN retrouve sans label client explicite"],
+                                proof_level="strong"
+                                if vlan_row.get("label")
+                                else "medium",
                                 extra={
                                     "interface_name": row["interface_name"],
                                     "interface_description": row["description"],
@@ -1429,7 +1845,9 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                                 f"description interface contient {service_ref}",
                                 f"interface {row['device_name']} {row['interface_name']}",
                             ],
-                            evidence_against=["aucun network_vlan_id structure retrouve pour ce vlan_id"],
+                            evidence_against=[
+                                "aucun network_vlan_id structure retrouve pour ce vlan_id"
+                            ],
                             proof_level="medium",
                             extra={
                                 "interface_name": row["interface_name"],
@@ -1440,7 +1858,7 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
             for row in con.execute(
                 "SELECT hostname, interface_name, description FROM ref_swag_interfaces "
                 "WHERE service_refs_json LIKE ? OR UPPER(description) LIKE ? LIMIT 12",
-                (f'%{service_ref}%', f'%{service_ref}%'),
+                (f"%{service_ref}%", f"%{service_ref}%"),
             ).fetchall():
                 vlan_ids = _extract_vlan_ids(row["description"])
                 for vlan_key in vlan_ids[:4]:
@@ -1448,25 +1866,38 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                         con,
                         vlan_key,
                         device_name=row["hostname"],
-                        prefixes=device_prefixes + _infer_device_prefixes(row["hostname"]),
+                        prefixes=device_prefixes
+                        + _infer_device_prefixes(row["hostname"]),
                     )
                     _add_vlan_hypothesis(
                         hypotheses,
                         hypothesis_index,
                         candidate_vlan_id=vlan_key,
-                        candidate_device=(vlan_rows[0].get("device_name") if vlan_rows else row["hostname"]),
+                        candidate_device=(
+                            vlan_rows[0].get("device_name")
+                            if vlan_rows
+                            else row["hostname"]
+                        ),
                         source="service_ref_swag",
-                        network_vlan_id=(vlan_rows[0].get("network_vlan_id") if vlan_rows else None),
+                        network_vlan_id=(
+                            vlan_rows[0].get("network_vlan_id") if vlan_rows else None
+                        ),
                         evidence_for=[
                             f"description SWAG contient {service_ref}",
                             f"interface {row['hostname']} {row['interface_name']}",
                         ],
-                        evidence_against=[] if vlan_rows else ["aucun network_vlan_id structure retrouve pour ce vlan_id"],
+                        evidence_against=[]
+                        if vlan_rows
+                        else [
+                            "aucun network_vlan_id structure retrouve pour ce vlan_id"
+                        ],
                         proof_level="strong" if vlan_rows else "medium",
                         extra={
                             "interface_name": row["interface_name"],
                             "interface_description": row["description"],
-                            "sw_label": vlan_rows[0].get("label") if vlan_rows else None,
+                            "sw_label": vlan_rows[0].get("label")
+                            if vlan_rows
+                            else None,
                         },
                     )
 
@@ -1497,32 +1928,45 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
             )
 
     # --- Source 4 : descriptions interfaces / SWAG par tokens client [medium] ---
-    data_explored.append("ref_network_interfaces/ref_swag_interfaces (description LIKE client tokens)")
+    data_explored.append(
+        "ref_network_interfaces/ref_swag_interfaces (description LIKE client tokens)"
+    )
     for tok in client_tokens[:4]:
         for row in con.execute(
             "SELECT device_name, interface_name, description, vlan_ids_json FROM ref_network_interfaces "
             "WHERE UPPER(description) LIKE ? LIMIT 10",
             (f"%{tok}%",),
         ).fetchall():
-            for vlan_key in _extract_vlan_ids(row["vlan_ids_json"], row["description"])[:4]:
+            for vlan_key in _extract_vlan_ids(row["vlan_ids_json"], row["description"])[
+                :4
+            ]:
                 vlan_rows = _lookup_vlan_rows(
                     con,
                     vlan_key,
                     device_name=row["device_name"],
-                    prefixes=device_prefixes + _infer_device_prefixes(row["device_name"]),
+                    prefixes=device_prefixes
+                    + _infer_device_prefixes(row["device_name"]),
                 )
                 _add_vlan_hypothesis(
                     hypotheses,
                     hypothesis_index,
                     candidate_vlan_id=vlan_key,
-                    candidate_device=(vlan_rows[0].get("device_name") if vlan_rows else row["device_name"]),
+                    candidate_device=(
+                        vlan_rows[0].get("device_name")
+                        if vlan_rows
+                        else row["device_name"]
+                    ),
                     source="client_token_interface",
-                    network_vlan_id=(vlan_rows[0].get("network_vlan_id") if vlan_rows else None),
+                    network_vlan_id=(
+                        vlan_rows[0].get("network_vlan_id") if vlan_rows else None
+                    ),
                     evidence_for=[
                         f"description interface contient token client '{tok}'",
                         f"interface {row['device_name']} {row['interface_name']}",
                     ],
-                    evidence_against=[] if vlan_rows else ["vlan_id extrait de la description seulement"],
+                    evidence_against=[]
+                    if vlan_rows
+                    else ["vlan_id extrait de la description seulement"],
                     proof_level="medium" if vlan_rows else "weak",
                     extra={
                         "interface_name": row["interface_name"],
@@ -1547,14 +1991,22 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                     hypotheses,
                     hypothesis_index,
                     candidate_vlan_id=vlan_key,
-                    candidate_device=(vlan_rows[0].get("device_name") if vlan_rows else row["hostname"]),
+                    candidate_device=(
+                        vlan_rows[0].get("device_name")
+                        if vlan_rows
+                        else row["hostname"]
+                    ),
                     source="client_token_swag",
-                    network_vlan_id=(vlan_rows[0].get("network_vlan_id") if vlan_rows else None),
+                    network_vlan_id=(
+                        vlan_rows[0].get("network_vlan_id") if vlan_rows else None
+                    ),
                     evidence_for=[
                         f"description SWAG contient token client '{tok}'",
                         f"interface {row['hostname']} {row['interface_name']}",
                     ],
-                    evidence_against=[] if vlan_rows else ["vlan_id extrait de la description SWAG seulement"],
+                    evidence_against=[]
+                    if vlan_rows
+                    else ["vlan_id extrait de la description SWAG seulement"],
                     proof_level="medium" if vlan_rows else "weak",
                     extra={
                         "interface_name": row["interface_name"],
@@ -1572,7 +2024,9 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
             break
 
     if co_prefix:
-        data_explored.append(f"ref_co_subinterface WHERE device_name LIKE '{co_prefix}-CO-%'")
+        data_explored.append(
+            f"ref_co_subinterface WHERE device_name LIKE '{co_prefix}-CO-%'"
+        )
         active_co = con.execute(
             "SELECT subif_id, device_name, interface_name, vlan_id, description, "
             "site_code, xconnect_circuit_id "
@@ -1593,7 +2047,9 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                 hyp["evidence_for"].append(
                     f"vlan_id confirme actif sur {co_prefix}-CO (xconnect present)"
                 )
-                if _VLAN_LEVEL_ORDER.get("medium", 99) < _VLAN_LEVEL_ORDER.get(hyp.get("proof_level", "weak"), 99):
+                if _VLAN_LEVEL_ORDER.get("medium", 99) < _VLAN_LEVEL_ORDER.get(
+                    hyp.get("proof_level", "weak"), 99
+                ):
                     hyp["proof_level"] = "medium"
 
     # --- Source 6 : CPE hostname -> port access -> VLAN [strong si CPE+port+vlan] ---
@@ -1607,16 +2063,20 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
     ).fetchall()
     if cpe_rows:
         for cpe in cpe_rows:
-            co_context.setdefault("cpe_hints", []).append({
-                "cpe_id": cpe["cpe_id"],
-                "hostname": cpe["hostname"],
-            })
+            co_context.setdefault("cpe_hints", []).append(
+                {
+                    "cpe_id": cpe["cpe_id"],
+                    "hostname": cpe["hostname"],
+                }
+            )
             for row in con.execute(
                 "SELECT device_name, interface_name, description, vlan_ids_json FROM ref_network_interfaces "
                 "WHERE UPPER(description) LIKE ? LIMIT 8",
                 (f"%{normalize_alias(cpe['hostname'])[:24]}%",),
             ).fetchall():
-                for vlan_key in _extract_vlan_ids(row["vlan_ids_json"], row["description"])[:3]:
+                for vlan_key in _extract_vlan_ids(
+                    row["vlan_ids_json"], row["description"]
+                )[:3]:
                     vlan_rows = _lookup_vlan_rows(
                         con,
                         vlan_key,
@@ -1627,14 +2087,22 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                         hypotheses,
                         hypothesis_index,
                         candidate_vlan_id=vlan_key,
-                        candidate_device=(vlan_rows[0].get("device_name") if vlan_rows else row["device_name"]),
+                        candidate_device=(
+                            vlan_rows[0].get("device_name")
+                            if vlan_rows
+                            else row["device_name"]
+                        ),
                         source="cpe_hint",
-                        network_vlan_id=(vlan_rows[0].get("network_vlan_id") if vlan_rows else None),
+                        network_vlan_id=(
+                            vlan_rows[0].get("network_vlan_id") if vlan_rows else None
+                        ),
                         evidence_for=[
                             f"CPE hint {cpe['hostname']}",
                             f"interface {row['device_name']} {row['interface_name']} suspecte",
                         ],
-                        evidence_against=[] if vlan_rows else ["pas de network_vlan_id structure confirme"],
+                        evidence_against=[]
+                        if vlan_rows
+                        else ["pas de network_vlan_id structure confirme"],
                         proof_level="medium" if vlan_rows else "weak",
                         extra={
                             "interface_name": row["interface_name"],
@@ -1643,7 +2111,9 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                     )
 
     # Sort hypotheses: strong first
-    hypotheses.sort(key=lambda h: _VLAN_LEVEL_ORDER.get(h.get("proof_level", "weak"), 2))
+    hypotheses.sort(
+        key=lambda h: _VLAN_LEVEL_ORDER.get(h.get("proof_level", "weak"), 2)
+    )
 
     return {
         "service_id": service_id,
@@ -1656,10 +2126,11 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
         "data_explored": data_explored,
         "summary": (
             f"{len(hypotheses)} hypothese(s) VLAN : "
-            f"{sum(1 for h in hypotheses if h['proof_level']=='strong')} strong, "
-            f"{sum(1 for h in hypotheses if h['proof_level']=='medium')} medium, "
-            f"{sum(1 for h in hypotheses if h['proof_level']=='weak')} weak"
-            if hypotheses else "Aucune hypothese VLAN trouvee"
+            f"{sum(1 for h in hypotheses if h['proof_level'] == 'strong')} strong, "
+            f"{sum(1 for h in hypotheses if h['proof_level'] == 'medium')} medium, "
+            f"{sum(1 for h in hypotheses if h['proof_level'] == 'weak')} weak"
+            if hypotheses
+            else "Aucune hypothese VLAN trouvee"
         ),
     }
 
@@ -1705,14 +2176,18 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
             rr = (r["ref_exploit"] or "").strip()
             if rr and rr not in seen_routes:
                 seen_routes.add(rr)
-                direct_evidence.append({
-                    "candidate_route_ref": rr,
-                    "candidate_lease_id": r["optical_lease_id"],
-                    "proof_level": "strong",
-                    "evidence_for": [f"ref_external '{ref_external}' = ref_exploit dans ref_optical_lease"],
-                    "evidence_against": [],
-                    "source": "ref_exploit_exact",
-                })
+                direct_evidence.append(
+                    {
+                        "candidate_route_ref": rr,
+                        "candidate_lease_id": r["optical_lease_id"],
+                        "proof_level": "strong",
+                        "evidence_for": [
+                            f"ref_external '{ref_external}' = ref_exploit dans ref_optical_lease"
+                        ],
+                        "evidence_against": [],
+                        "source": "ref_exploit_exact",
+                    }
+                )
 
     # --- Source 2 : route_refs_json (TOIP) -> ref_optical_lease.ref_exploit [strong] ---
     toip_refs: list[str] = []
@@ -1738,16 +2213,18 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
             rr = (r["ref_exploit"] or "").strip()
             if rr and rr not in seen_routes:
                 seen_routes.add(rr)
-                direct_evidence.append({
-                    "candidate_route_ref": rr,
-                    "candidate_lease_id": r["optical_lease_id"],
-                    "proof_level": "strong",
-                    "evidence_for": [
-                        f"LEA route_ref '{raw_ref}' matche ref_exploit '{rr}' dans ref_optical_lease",
-                    ],
-                    "evidence_against": [],
-                    "source": "toip_lease",
-                })
+                direct_evidence.append(
+                    {
+                        "candidate_route_ref": rr,
+                        "candidate_lease_id": r["optical_lease_id"],
+                        "proof_level": "strong",
+                        "evidence_for": [
+                            f"LEA route_ref '{raw_ref}' matche ref_exploit '{rr}' dans ref_optical_lease",
+                        ],
+                        "evidence_against": [],
+                        "source": "toip_lease",
+                    }
+                )
 
     # --- Source 3 : endpoints A et Z dans ref_optical_lease_endpoint [strong/medium] ---
     has_lease_ep = con.execute(
@@ -1755,14 +2232,16 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
     ).fetchone()
     site_ids = [sid for sid in (svc["site_a_id"], svc["site_z_id"]) if sid]
     if has_lease_ep and site_ids:
-        data_explored.append("ref_optical_lease_endpoint WHERE site_id IN (site_a, site_z)")
+        data_explored.append(
+            "ref_optical_lease_endpoint WHERE site_id IN (site_a, site_z)"
+        )
         lease_ep_rows = con.execute(
             f"""SELECT ole.optical_lease_id, ole.ref_exploit, ole.lease_kind,
                        GROUP_CONCAT(ep.endpoint_label) as endpoints,
                        GROUP_CONCAT(ep.site_id) as site_ids
                 FROM ref_optical_lease ole
                 JOIN ref_optical_lease_endpoint ep ON ep.optical_lease_id = ole.optical_lease_id
-                WHERE ep.site_id IN ({','.join('?' for _ in site_ids)})
+                WHERE ep.site_id IN ({",".join("?" for _ in site_ids)})
                 GROUP BY ole.optical_lease_id
                 ORDER BY ole.ref_exploit
                 LIMIT 10""",
@@ -1774,22 +2253,32 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                 continue
             seen_routes.add(rr)
             found_sites = set((r["site_ids"] or "").split(","))
-            both_ends = svc["site_a_id"] in found_sites and svc["site_z_id"] in found_sites
-            direct_evidence.append({
-                "candidate_route_ref": rr,
-                "candidate_lease_id": r["optical_lease_id"],
-                "proof_level": "strong" if both_ends else "medium",
-                "evidence_for": [
-                    f"lease {r['optical_lease_id']} a des endpoints aux sites {r['site_ids']}",
-                    "les deux bouts confirmes" if both_ends else "un seul bout confirme",
-                ],
-                "evidence_against": [] if both_ends else ["site Z non confirme par endpoint"],
-                "source": "lease_endpoint",
-            })
+            both_ends = (
+                svc["site_a_id"] in found_sites and svc["site_z_id"] in found_sites
+            )
+            direct_evidence.append(
+                {
+                    "candidate_route_ref": rr,
+                    "candidate_lease_id": r["optical_lease_id"],
+                    "proof_level": "strong" if both_ends else "medium",
+                    "evidence_for": [
+                        f"lease {r['optical_lease_id']} a des endpoints aux sites {r['site_ids']}",
+                        "les deux bouts confirmes"
+                        if both_ends
+                        else "un seul bout confirme",
+                    ],
+                    "evidence_against": []
+                    if both_ends
+                    else ["site Z non confirme par endpoint"],
+                    "source": "lease_endpoint",
+                }
+            )
 
     # --- Source 4 : leases par tokens de site/client dans comments/reference [medium] ---
     if client_tokens:
-        data_explored.append("ref_optical_lease/comments/reference via tokens client/site")
+        data_explored.append(
+            "ref_optical_lease/comments/reference via tokens client/site"
+        )
         lease_matches: dict[str, dict[str, Any]] = {}
         for token in client_tokens[:5]:
             for row in con.execute(
@@ -1800,12 +2289,17 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                 "LIMIT 12",
                 (f"%{token}%",),
             ).fetchall():
-                route_key = (row["ref_exploit"] or "").strip() or f"LEASE:{row['optical_lease_id']}"
-                match = lease_matches.setdefault(route_key, {
-                    "route_ref": (row["ref_exploit"] or "").strip() or None,
-                    "lease_id": row["optical_lease_id"],
-                    "matched_tokens": [],
-                })
+                route_key = (
+                    row["ref_exploit"] or ""
+                ).strip() or f"LEASE:{row['optical_lease_id']}"
+                match = lease_matches.setdefault(
+                    route_key,
+                    {
+                        "route_ref": (row["ref_exploit"] or "").strip() or None,
+                        "lease_id": row["optical_lease_id"],
+                        "matched_tokens": [],
+                    },
+                )
                 if token not in match["matched_tokens"]:
                     match["matched_tokens"].append(token)
 
@@ -1815,27 +2309,35 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                 continue
             if len(match["matched_tokens"]) >= 2:
                 seen_routes.add(route_ref)
-                direct_evidence.append({
-                    "candidate_route_ref": match["route_ref"],
-                    "candidate_lease_id": match["lease_id"],
-                    "proof_level": "medium",
-                    "evidence_for": [
-                        f"lease {match['lease_id']} matche tokens {', '.join(match['matched_tokens'])}",
-                    ],
-                    "evidence_against": ["matching textuel sur comments/reference - confirmation directe absente"],
-                    "source": "lease_comment_token_match",
-                })
+                direct_evidence.append(
+                    {
+                        "candidate_route_ref": match["route_ref"],
+                        "candidate_lease_id": match["lease_id"],
+                        "proof_level": "medium",
+                        "evidence_for": [
+                            f"lease {match['lease_id']} matche tokens {', '.join(match['matched_tokens'])}",
+                        ],
+                        "evidence_against": [
+                            "matching textuel sur comments/reference - confirmation directe absente"
+                        ],
+                        "source": "lease_comment_token_match",
+                    }
+                )
             else:
-                context_only.append({
-                    "candidate_route_ref": match["route_ref"],
-                    "candidate_lease_id": match["lease_id"],
-                    "source": "lease_comment_token_match",
-                    "evidence_for": [
-                        f"lease {match['lease_id']} matche token {', '.join(match['matched_tokens'])}",
-                    ],
-                    "evidence_against": ["un seul token commun - preuve insuffisante"],
-                    "note": "contexte de lease sans preuve suffisante a lui seul",
-                })
+                context_only.append(
+                    {
+                        "candidate_route_ref": match["route_ref"],
+                        "candidate_lease_id": match["lease_id"],
+                        "source": "lease_comment_token_match",
+                        "evidence_for": [
+                            f"lease {match['lease_id']} matche token {', '.join(match['matched_tokens'])}",
+                        ],
+                        "evidence_against": [
+                            "un seul token commun - preuve insuffisante"
+                        ],
+                        "note": "contexte de lease sans preuve suffisante a lui seul",
+                    }
+                )
 
     # --- Source 5 : ref_route_parcours via site A/Z tokens [medium] ---
     has_parcours = con.execute(
@@ -1844,12 +2346,29 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
     site_z_name = (svc["site_z_name"] or svc["endpoint_z_raw"] or "").upper()
     site_tokens: list[str] = []
     site_a_tokens: list[str] = []
-    _EXCLUDE_TOKENS = {"SITE", "POP", "NRA", "TELOISE", "FRANCE", "NORD", "SUD", "EST", "OUEST",
-                       "SAINT", "COMMUNE", "VILLE", "MAIRIE", "AGENCE", "HOTEL"}
+    _EXCLUDE_TOKENS = {
+        "SITE",
+        "POP",
+        "NRA",
+        "TELOISE",
+        "FRANCE",
+        "NORD",
+        "SUD",
+        "EST",
+        "OUEST",
+        "SAINT",
+        "COMMUNE",
+        "VILLE",
+        "MAIRIE",
+        "AGENCE",
+        "HOTEL",
+    }
     for tok in re.split(r"[^A-Z0-9]+", site_z_name):
         if len(tok) >= 4 and tok not in _EXCLUDE_TOKENS:
             site_tokens.append(tok)
-    for tok in re.split(r"[^A-Z0-9]+", (svc["site_a_name"] or svc["endpoint_a_raw"] or "").upper()):
+    for tok in re.split(
+        r"[^A-Z0-9]+", (svc["site_a_name"] or svc["endpoint_a_raw"] or "").upper()
+    ):
         if len(tok) >= 4 and tok not in _EXCLUDE_TOKENS:
             site_a_tokens.append(tok)
 
@@ -1876,40 +2395,56 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                 if not rr or rr in seen_routes or rr in seen_parcours_routes:
                     continue
                 if rr in routes_for_a:
-                    distinct_pair = (tok not in site_a_tokens) or any(a_tok not in site_tokens for a_tok in routes_for_a[rr])
+                    distinct_pair = (tok not in site_a_tokens) or any(
+                        a_tok not in site_tokens for a_tok in routes_for_a[rr]
+                    )
                     seen_parcours_routes.add(rr)
                     if distinct_pair:
                         seen_routes.add(rr)
-                        direct_evidence.append({
-                            "candidate_route_ref": rr,
-                            "candidate_lease_id": None,
-                            "proof_level": "medium",
-                            "evidence_for": [
-                                f"route presente dans ref_route_parcours pour tokens A {', '.join(routes_for_a[rr])}",
-                                f"route presente dans ref_route_parcours pour token Z '{tok}'",
-                            ],
-                            "evidence_against": ["parcours par tokens - confirmation directe absente"],
-                            "source": "parcours_site_pair",
-                        })
+                        direct_evidence.append(
+                            {
+                                "candidate_route_ref": rr,
+                                "candidate_lease_id": None,
+                                "proof_level": "medium",
+                                "evidence_for": [
+                                    f"route presente dans ref_route_parcours pour tokens A {', '.join(routes_for_a[rr])}",
+                                    f"route presente dans ref_route_parcours pour token Z '{tok}'",
+                                ],
+                                "evidence_against": [
+                                    "parcours par tokens - confirmation directe absente"
+                                ],
+                                "source": "parcours_site_pair",
+                            }
+                        )
                     else:
-                        context_only.append({
-                            "candidate_route_ref": rr,
-                            "source": "parcours_site_pair",
-                            "evidence_for": [
-                                f"route partage le meme token geographique '{tok}' cote A et Z",
-                            ],
-                            "evidence_against": ["meme token geographique des deux cotes - trop ambigu pour conclure"],
-                            "note": "contexte uniquement - paire de sites non assez discriminante",
-                        })
+                        context_only.append(
+                            {
+                                "candidate_route_ref": rr,
+                                "source": "parcours_site_pair",
+                                "evidence_for": [
+                                    f"route partage le meme token geographique '{tok}' cote A et Z",
+                                ],
+                                "evidence_against": [
+                                    "meme token geographique des deux cotes - trop ambigu pour conclure"
+                                ],
+                                "note": "contexte uniquement - paire de sites non assez discriminante",
+                            }
+                        )
                     continue
                 seen_parcours_routes.add(rr)
-                context_only.append({
-                    "candidate_route_ref": rr,
-                    "source": "parcours_site_z",
-                    "evidence_for": [f"route passe par site token '{tok}' (site_z={svc['site_z_name']})"],
-                    "evidence_against": ["parcours seul insuffisant - pas de lien direct au service"],
-                    "note": "contexte uniquement - ne prouve pas le lien au service",
-                })
+                context_only.append(
+                    {
+                        "candidate_route_ref": rr,
+                        "source": "parcours_site_z",
+                        "evidence_for": [
+                            f"route passe par site token '{tok}' (site_z={svc['site_z_name']})"
+                        ],
+                        "evidence_against": [
+                            "parcours seul insuffisant - pas de lien direct au service"
+                        ],
+                        "note": "contexte uniquement - ne prouve pas le lien au service",
+                    }
+                )
 
     # --- Source 6 : housing -> optical_connection -> cable au site Z [contexte] ---
     has_housing = con.execute(
@@ -1922,7 +2457,9 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ref_optical_cable'"
     ).fetchone()
     if has_housing:
-        data_explored.append("ref_optical_housing + ref_optical_connection + ref_optical_cable")
+        data_explored.append(
+            "ref_optical_housing + ref_optical_connection + ref_optical_cable"
+        )
         housing_rows = []
         if svc["site_z_id"]:
             housing_rows = con.execute(
@@ -1951,7 +2488,11 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                     "SELECT obj1_type, obj1_migration_oid, obj2_type, obj2_migration_oid "
                     "FROM ref_optical_connection WHERE housing_migration_oid = ? OR obj1_migration_oid = ? OR obj2_migration_oid = ? "
                     "LIMIT 20",
-                    (housing["migration_oid"], housing["migration_oid"], housing["migration_oid"]),
+                    (
+                        housing["migration_oid"],
+                        housing["migration_oid"],
+                        housing["migration_oid"],
+                    ),
                 ).fetchall():
                     for obj_type, obj_migoid in (
                         (conn["obj1_type"], conn["obj1_migration_oid"]),
@@ -1963,18 +2504,24 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                             "SELECT cable_id, reference, userreference FROM ref_optical_cable WHERE migration_oid = ? LIMIT 5",
                             (obj_migoid,),
                         ).fetchall():
-                            ref = cable["reference"] or cable["userreference"] or cable["cable_id"]
+                            ref = (
+                                cable["reference"]
+                                or cable["userreference"]
+                                or cable["cable_id"]
+                            )
                             if ref and ref not in cable_refs:
                                 cable_refs.append(str(ref))
-            context_only.append({
-                "type": "housing_chain",
-                "housing_id": housing["housing_id"],
-                "reference": housing["reference"],
-                "site_name": housing["site_name"],
-                "source": "housing_site_z",
-                "cable_refs": cable_refs,
-                "note": "topologie passive au site Z - utile pour guider la recherche de route",
-            })
+            context_only.append(
+                {
+                    "type": "housing_chain",
+                    "housing_id": housing["housing_id"],
+                    "reference": housing["reference"],
+                    "site_name": housing["site_name"],
+                    "source": "housing_site_z",
+                    "cable_refs": cable_refs,
+                    "note": "topologie passive au site Z - utile pour guider la recherche de route",
+                }
+            )
 
     return {
         "service_id": service_id,
@@ -1988,13 +2535,35 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
         "data_explored": data_explored,
         "summary": (
             f"{len(direct_evidence)} evidence(s) directe(s) : "
-            f"{sum(1 for e in direct_evidence if e['proof_level']=='strong')} strong, "
-            f"{sum(1 for e in direct_evidence if e['proof_level']=='medium')} medium. "
+            f"{sum(1 for e in direct_evidence if e['proof_level'] == 'strong')} strong, "
+            f"{sum(1 for e in direct_evidence if e['proof_level'] == 'medium')} medium. "
             f"{len(context_only)} element(s) contexte seul."
-            if direct_evidence else
-            f"Aucune evidence directe. {len(context_only)} element(s) contexte seul."
+            if direct_evidence
+            else f"Aucune evidence directe. {len(context_only)} element(s) contexte seul."
         ),
     }
+
+
+@tool(
+    "hunt_site_anchor",
+    "Construit l'ancre d'enquete GDB/spatiale d'un service : sites A/Z, qualite des matches, "
+    "seeds spatiaux, actifs optiques proches et point d'entree recommande (site, route, reseau). "
+    "A utiliser en debut d'enquete quand l'ancre n'est pas evidente.",
+    {"service_id": str},
+)
+async def hunt_site_anchor(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = args.get("service_id", "").strip()
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _build_site_anchor(con, service_id)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
 
 
 @tool(
@@ -2062,7 +2631,9 @@ async def hunt_route(args: dict[str, Any]) -> dict[str, Any]:
 async def get_co_cluster(args: dict[str, Any]) -> dict[str, Any]:
     location_prefix = (args.get("location_prefix") or "").strip().upper()
     if not location_prefix:
-        return _text("ERROR: No location_prefix provided (ex: 'COM1', 'CRL1', 'AMI3', 'BEA1').")
+        return _text(
+            "ERROR: No location_prefix provided (ex: 'COM1', 'CRL1', 'AMI3', 'BEA1')."
+        )
 
     con = _connect(read_only=True)
     try:
@@ -2105,23 +2676,30 @@ async def get_co_cluster(args: dict[str, Any]) -> dict[str, Any]:
             else:
                 pool_vlans.append(row_dict)
 
-        return _text(json.dumps({
-            "location_prefix": location_prefix,
-            "sw_prefix_used": sw_prefix,
-            "devices": devices,
-            "total_subifs": len(all_subifs),
-            "active_circuits_count": len(active_circuits),
-            "pool_vlans_count": len(pool_vlans),
-            "toip_circuits_count": len(toip_circuits),
-            "active_circuits": active_circuits[:50],
-            "pool_vlans": pool_vlans[:20],
-            "toip_circuits": toip_circuits[:30],
-            "note": (
-                "active_circuits = xconnect_circuit_id non null (circuit reel confirme). "
-                "pool_vlans = xconnect null (potentiellement libre mais non prouve). "
-                "toip_circuits = xconnect numerique uniquement (candidats TOIP)."
-            ),
-        }, indent=2, ensure_ascii=False, default=str))
+        return _text(
+            json.dumps(
+                {
+                    "location_prefix": location_prefix,
+                    "sw_prefix_used": sw_prefix,
+                    "devices": devices,
+                    "total_subifs": len(all_subifs),
+                    "active_circuits_count": len(active_circuits),
+                    "pool_vlans_count": len(pool_vlans),
+                    "toip_circuits_count": len(toip_circuits),
+                    "active_circuits": active_circuits[:50],
+                    "pool_vlans": pool_vlans[:20],
+                    "toip_circuits": toip_circuits[:30],
+                    "note": (
+                        "active_circuits = xconnect_circuit_id non null (circuit reel confirme). "
+                        "pool_vlans = xconnect null (potentiellement libre mais non prouve). "
+                        "toip_circuits = xconnect numerique uniquement (candidats TOIP)."
+                    ),
+                },
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            )
+        )
     except Exception as e:
         return _text(f"ERROR: {e}")
     finally:
