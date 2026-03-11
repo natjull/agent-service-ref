@@ -320,6 +320,17 @@ async def validate_resolution(args: dict[str, Any]) -> dict[str, Any]:
             (res["resolution_id"],),
         ).fetchall()
         evidence_types = {row["evidence_type"] for row in evidence_rows}
+        svc_meta = con.execute(
+            "SELECT nature_service FROM service_master_active WHERE service_id = ?",
+            (service_id,),
+        ).fetchone()
+        nature_service = (svc_meta["nature_service"] or "").strip() if svc_meta else ""
+        resolution_status = (res["resolution_status"] or "validated").strip()
+
+        if resolution_status == "declared_gap":
+            if not (res["data_gap_reason"] or "").strip():
+                errors.append("declared_gap sans data_gap_reason")
+            checks.append("resolution_status=declared_gap")
 
         # Anti self-loop: site_a must differ from site_z
         if res["site_a"] and res["site_z"] and res["site_a"].strip().upper() == res["site_z"].strip().upper():
@@ -391,8 +402,21 @@ async def validate_resolution(args: dict[str, Any]) -> dict[str, Any]:
         if res["confidence"] == "low":
             checks.append("low confidence — flagged for review")
 
+        # Enforce target attributes for non-gap resolutions
+        if resolution_status != "declared_gap":
+            if nature_service == "Lan To Lan":
+                if not (res["network_vlan_id"] or "").strip():
+                    errors.append("L2L sans network_vlan_id — resolution incomplete")
+                if not (res["route_ref"] or "").strip():
+                    errors.append("L2L sans route_ref — resolution incomplete")
+            elif nature_service in ("IRU FON", "Location FON"):
+                if not (res["route_ref"] or "").strip():
+                    errors.append("FON sans route_ref — resolution incomplete")
+
         # Decide validation status
-        if errors:
+        if resolution_status == "declared_gap" and not errors:
+            status = "declared_gap"
+        elif errors:
             status = "rejected"
         elif warnings:
             status = "needs_review"
@@ -567,7 +591,7 @@ async def submit_declared_gap(args: dict[str, Any]) -> dict[str, Any]:
                 service_id,
                 "low",
                 justification,
-                "proposed",
+                "declared_gap",
                 0,
                 "declared_gap",
                 json.dumps(gap_payload, ensure_ascii=True),
@@ -603,6 +627,7 @@ async def list_resolutions(args: dict[str, Any]) -> dict[str, Any]:
     try:
         query = """
             SELECT r.resolution_id, r.service_id, r.confidence, r.status,
+                   COALESCE(r.resolution_status, 'validated') AS resolution_status,
                    r.evidence_count, r.justification,
                    s.principal_client, s.nature_service,
                    r.network_vlan_id, r.route_ref
@@ -630,14 +655,14 @@ async def list_resolutions(args: dict[str, Any]) -> dict[str, Any]:
             return _text("No resolutions found matching filters.")
 
         lines = [
-            "service_id | client | nature | confidence | status | evidences | vlan | route_ref",
-            "--- | --- | --- | --- | --- | --- | --- | ---",
+            "service_id | client | nature | confidence | status | resolution_status | evidences | vlan | route_ref",
+            "--- | --- | --- | --- | --- | --- | --- | --- | ---",
         ]
         for row in rows:
             lines.append(
                 f"{row['service_id']} | {row['principal_client']} | "
                 f"{row['nature_service']} | {row['confidence']} | "
-                f"{row['status']} | {row['evidence_count']} | "
+                f"{row['status']} | {row['resolution_status']} | {row['evidence_count']} | "
                 f"{row['network_vlan_id'] or '-'} | {row['route_ref'] or '-'}"
             )
 
