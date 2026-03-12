@@ -1545,6 +1545,93 @@ def _best_spatial_seed(seeds: list[sqlite3.Row]) -> dict[str, Any] | None:
     return _row_to_dict(ordered[0])
 
 
+def _norm_token_text(value: object) -> str:
+    return normalize_alias(value)
+
+
+def _site_label_tokens(*values: object) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    excluded = {
+        "SITE",
+        "POP",
+        "NRA",
+        "TELOISE",
+        "FRANCE",
+        "NORD",
+        "SUD",
+        "EST",
+        "OUEST",
+        "SAINT",
+        "COMMUNE",
+        "VILLE",
+        "MAIRIE",
+        "AGENCE",
+        "HOTEL",
+        "BASE",
+        "LOCAL",
+        "CLIENT",
+        "SERVICE",
+        "MINISTERE",
+        "DEFENSE",
+    }
+    for value in values:
+        normalized = _norm_token_text(value)
+        if not normalized:
+            continue
+        for token in normalized.split():
+            if len(token) < 4 or token in excluded:
+                continue
+            if token not in seen:
+                seen.add(token)
+                tokens.append(token)
+    return tokens
+
+
+def _anchor_geom_from_site_anchor(anchor: dict[str, Any]) -> dict[str, Any] | None:
+    endpoints = anchor.get("endpoints") or []
+    site_assets = {
+        str(asset.get("site_id") or ""): asset
+        for asset in (anchor.get("site_assets") or [])
+    }
+    preferred_site_id = None
+    for label in ("Z", "A"):
+        preferred_site_id = next(
+            (
+                row.get("matched_site_id")
+                for row in endpoints
+                if row.get("endpoint_label") == label and row.get("matched_site_id")
+            ),
+            None,
+        )
+        if preferred_site_id:
+            break
+    if preferred_site_id and preferred_site_id in site_assets:
+        asset = site_assets[preferred_site_id]
+        x = asset.get("geom_x")
+        y = asset.get("geom_y")
+        if x is not None and y is not None:
+            return {
+                "x_l93": x,
+                "y_l93": y,
+                "source": "site_gdb",
+                "site_id": preferred_site_id,
+            }
+    best_seed = anchor.get("best_spatial_seed") or {}
+    if best_seed.get("x_l93") is not None and best_seed.get("y_l93") is not None:
+        return {
+            "x_l93": best_seed.get("x_l93"),
+            "y_l93": best_seed.get("y_l93"),
+            "source": "ban_seed",
+            "site_id": preferred_site_id,
+        }
+    return None
+
+
+def _distance_sq(x1: float, y1: float, x2: float, y2: float) -> float:
+    return (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2)
+
+
 def _build_site_anchor(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
     service = con.execute(
         """SELECT service_id, nature_service, principal_client, client_final,
@@ -1713,6 +1800,13 @@ def _build_site_anchor(con: sqlite3.Connection, service_id: str) -> dict[str, An
         "spatial_seeds": _rows_to_dicts(seeds),
         "spatial_evidence": _rows_to_dicts(spatial),
         "best_spatial_seed": best_seed,
+        "anchor_geometry": _anchor_geom_from_site_anchor(
+            {
+                "endpoints": _rows_to_dicts(endpoints),
+                "site_assets": site_assets,
+                "best_spatial_seed": best_seed,
+            }
+        ),
         "site_assets": site_assets,
         "network_hint_counts": dict(network_hint_counts) if network_hint_counts else {},
         "device_prefix_hints": device_prefixes,
@@ -2175,6 +2269,41 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
         key=lambda h: _VLAN_LEVEL_ORDER.get(h.get("proof_level", "weak"), 2)
     )
 
+    ambiguity_groups: list[dict[str, Any]] = []
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for hyp in hypotheses:
+        label = _norm_token_text(hyp.get("label") or hyp.get("sw_label") or "")
+        if not label and not hyp.get("network_vlan_id"):
+            continue
+        key = (str(hyp.get("candidate_device") or ""), label)
+        grouped.setdefault(key, []).append(hyp)
+    for (device_name, label), items in grouped.items():
+        vlan_ids = [
+            str(item.get("candidate_vlan_id") or "")
+            for item in items
+            if item.get("candidate_vlan_id")
+        ]
+        distinct_vlans = sorted({vlan_id for vlan_id in vlan_ids if vlan_id})
+        if len(distinct_vlans) <= 1:
+            continue
+        proof_levels = {str(item.get("proof_level") or "weak") for item in items}
+        ambiguity_groups.append(
+            {
+                "device_name": device_name,
+                "label_hint": label,
+                "candidate_vlan_ids": distinct_vlans,
+                "proof_levels": sorted(proof_levels),
+            }
+        )
+        for item in items:
+            item["disambiguation_needed"] = True
+            item["ambiguity_group"] = distinct_vlans
+            item.setdefault("evidence_against", []).append(
+                f"plusieurs VLANs concurrents sur {device_name or 'device inconnu'}: {', '.join(distinct_vlans)}"
+            )
+            if item.get("proof_level") == "strong":
+                item["proof_level"] = "medium"
+
     return {
         "service_id": service_id,
         "nature_service": svc["nature_service"],
@@ -2182,6 +2311,7 @@ def _hunt_vlan(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
         "site_z": svc["site_z_name"],
         "co_prefix_used": co_prefix,
         "hypotheses": hypotheses,
+        "ambiguity_groups": ambiguity_groups,
         "co_context": co_context,
         "data_explored": data_explored,
         "summary": (
@@ -2260,6 +2390,53 @@ def _resolve_passive_chain(
                 tuple(cable_migoids),
             ).fetchall()
         )
+    if (
+        not cables
+        and site_asset
+        and site_asset.get("geom_x") is not None
+        and site_asset.get("geom_y") is not None
+    ):
+        x = float(site_asset["geom_x"])
+        y = float(site_asset["geom_y"])
+        for cable in con.execute(
+            "SELECT cable_id, migration_oid, reference, userreference, comments, site_tokens_json, geom_start_x, geom_start_y, geom_end_x, geom_end_y, geom_centroid_x, geom_centroid_y "
+            "FROM ref_optical_cable "
+            "WHERE (geom_centroid_x BETWEEN ? AND ? AND geom_centroid_y BETWEEN ? AND ?) "
+            "   OR (geom_start_x BETWEEN ? AND ? AND geom_start_y BETWEEN ? AND ?) "
+            "   OR (geom_end_x BETWEEN ? AND ? AND geom_end_y BETWEEN ? AND ?) "
+            "LIMIT 20",
+            (
+                x - 300,
+                x + 300,
+                y - 300,
+                y + 300,
+                x - 300,
+                x + 300,
+                y - 300,
+                y + 300,
+                x - 300,
+                x + 300,
+                y - 300,
+                y + 300,
+            ),
+        ).fetchall():
+            cable_dict = _row_to_dict(cable) or {}
+            best_distance = None
+            for key_x, key_y in (
+                ("geom_start_x", "geom_start_y"),
+                ("geom_end_x", "geom_end_y"),
+                ("geom_centroid_x", "geom_centroid_y"),
+            ):
+                cx = cable_dict.get(key_x)
+                cy = cable_dict.get(key_y)
+                if cx is None or cy is None:
+                    continue
+                distance = _distance_sq(x, y, float(cx), float(cy)) ** 0.5
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+            if best_distance is not None and best_distance <= 300:
+                cable_dict["distance_meters"] = round(best_distance, 1)
+                cables.append(cable_dict)
 
     linked_leases: list[dict[str, Any]] = []
     if _table_or_view_exists(con, "ref_optical_lease_endpoint"):
@@ -2307,23 +2484,31 @@ def _resolve_cable_spatial(
     con: sqlite3.Connection, service_id: str, radius_meters: int = 300
 ) -> dict[str, Any]:
     anchor = _build_site_anchor(con, service_id)
+    anchor_geom = anchor.get("anchor_geometry") or {}
     best_seed = anchor.get("best_spatial_seed") or {}
-    x_l93 = best_seed.get("x_l93")
-    y_l93 = best_seed.get("y_l93")
+    x_l93 = anchor_geom.get("x_l93")
+    y_l93 = anchor_geom.get("y_l93")
     if x_l93 is None or y_l93 is None:
         return {
             "service_id": service_id,
             "radius_meters": radius_meters,
+            "anchor_geometry": anchor_geom or None,
             "best_spatial_seed": best_seed or None,
             "cable_candidates": [],
             "summary": "Aucun seed spatial exploitable pour chercher des cables proches.",
         }
 
     query = (
-        "SELECT cable_id, reference, userreference, site_tokens_json, geom_centroid_x, geom_centroid_y, "
-        "((geom_centroid_x - ?) * (geom_centroid_x - ?) + (geom_centroid_y - ?) * (geom_centroid_y - ?)) AS distance_sq "
+        "SELECT cable_id, reference, userreference, site_tokens_json, geom_start_x, geom_start_y, geom_end_x, geom_end_y, geom_centroid_x, geom_centroid_y, "
+        "MIN("
+        "COALESCE(((geom_centroid_x - ?) * (geom_centroid_x - ?) + (geom_centroid_y - ?) * (geom_centroid_y - ?)), 9e18),"
+        "COALESCE(((geom_start_x - ?) * (geom_start_x - ?) + (geom_start_y - ?) * (geom_start_y - ?)), 9e18),"
+        "COALESCE(((geom_end_x - ?) * (geom_end_x - ?) + (geom_end_y - ?) * (geom_end_y - ?)), 9e18)"
+        ") AS distance_sq "
         "FROM ref_optical_cable "
-        "WHERE geom_centroid_x BETWEEN ? AND ? AND geom_centroid_y BETWEEN ? AND ? "
+        "WHERE (geom_centroid_x BETWEEN ? AND ? AND geom_centroid_y BETWEEN ? AND ?) "
+        "   OR (geom_start_x BETWEEN ? AND ? AND geom_start_y BETWEEN ? AND ?) "
+        "   OR (geom_end_x BETWEEN ? AND ? AND geom_end_y BETWEEN ? AND ?) "
         "ORDER BY distance_sq ASC LIMIT 20"
     )
     rows = []
@@ -2334,6 +2519,22 @@ def _resolve_cable_spatial(
             x_l93,
             y_l93,
             y_l93,
+            x_l93,
+            x_l93,
+            y_l93,
+            y_l93,
+            x_l93,
+            x_l93,
+            y_l93,
+            y_l93,
+            x_l93 - radius_meters,
+            x_l93 + radius_meters,
+            y_l93 - radius_meters,
+            y_l93 + radius_meters,
+            x_l93 - radius_meters,
+            x_l93 + radius_meters,
+            y_l93 - radius_meters,
+            y_l93 + radius_meters,
             x_l93 - radius_meters,
             x_l93 + radius_meters,
             y_l93 - radius_meters,
@@ -2348,9 +2549,276 @@ def _resolve_cable_spatial(
     return {
         "service_id": service_id,
         "radius_meters": radius_meters,
+        "anchor_geometry": anchor_geom,
         "best_spatial_seed": best_seed,
         "cable_candidates": rows,
-        "summary": f"{len(rows)} cable(s) a moins de {radius_meters}m du meilleur seed spatial.",
+        "summary": f"{len(rows)} cable(s) a moins de {radius_meters}m de l'ancre geometrique {anchor_geom.get('source', 'unknown')}.",
+    }
+
+
+def _build_route_topology_bundle(
+    con: sqlite3.Connection, route_ref: str, *, limit_steps: int = 60
+) -> dict[str, Any]:
+    route_ref = (route_ref or "").strip()
+    if not route_ref:
+        return {"error": "route_ref manquant"}
+
+    route_row = con.execute(
+        "SELECT route_id, route_ref, network, client, lessee, status FROM ref_routes WHERE route_ref = ? OR route_id = ? LIMIT 1",
+        (route_ref, route_ref),
+    ).fetchone()
+    if route_row is None:
+        route_row = con.execute(
+            "SELECT route_id, route_ref, network, client, lessee, status FROM ref_routes WHERE route_ref LIKE ? LIMIT 1",
+            (f"%{route_ref}%",),
+        ).fetchone()
+    route = _row_to_dict(route_row) or {"route_ref": route_ref, "route_id": None}
+    effective_route_ref = str(route.get("route_ref") or route_ref)
+    effective_route_id = route.get("route_id")
+
+    parcours = _rows_to_dicts(
+        con.execute(
+            "SELECT route_ref, route_id, step_no, step_type, site, site_detail, address, bpe, cable_in, cable_out, commentaire "
+            "FROM ref_route_parcours WHERE route_ref = ? OR route_id = ? ORDER BY step_no LIMIT ?",
+            (effective_route_ref, effective_route_id, limit_steps),
+        ).fetchall()
+    )
+    endpoints = []
+    if _table_or_view_exists(con, "v_route_endpoint_sites"):
+        endpoints = _rows_to_dicts(
+            con.execute(
+                "SELECT route_ref, route_id, step_no, step_type, site_label, site_detail, bpe, cable_in, cable_out, commentaire "
+                "FROM v_route_endpoint_sites WHERE route_ref = ? OR route_id = ? ORDER BY step_no",
+                (effective_route_ref, effective_route_id),
+            ).fetchall()
+        )
+
+    cable_refs: list[str] = []
+    bpe_refs: list[str] = []
+    site_labels: list[str] = []
+    seen_cables: set[str] = set()
+    seen_bpes: set[str] = set()
+    seen_sites: set[str] = set()
+    for row in parcours:
+        for key in ("cable_in", "cable_out"):
+            ref = str(row.get(key) or "").strip()
+            if ref and ref not in seen_cables:
+                seen_cables.add(ref)
+                cable_refs.append(ref)
+        bpe = str(row.get("bpe") or "").strip()
+        if bpe and bpe not in seen_bpes:
+            seen_bpes.add(bpe)
+            bpe_refs.append(bpe)
+        site = str(row.get("site") or "").strip()
+        if site and site not in seen_sites:
+            seen_sites.add(site)
+            site_labels.append(site)
+
+    route_leases = _rows_to_dicts(
+        con.execute(
+            "SELECT optical_lease_id, ref_exploit, reference, lease_kind, client, lessee, comments "
+            "FROM ref_optical_lease WHERE ref_exploit = ? OR ref_exploit LIKE ? LIMIT 20",
+            (effective_route_ref, f"%{effective_route_ref}%"),
+        ).fetchall()
+    )
+
+    route_cables: list[dict[str, Any]] = []
+    if cable_refs:
+        placeholders = ",".join("?" for _ in cable_refs)
+        route_cables = _rows_to_dicts(
+            con.execute(
+                f"SELECT cable_id, reference, userreference, site_tokens_json, geom_start_x, geom_start_y, geom_end_x, geom_end_y, geom_centroid_x, geom_centroid_y "
+                f"FROM ref_optical_cable WHERE reference IN ({placeholders}) OR userreference IN ({placeholders}) LIMIT 40",
+                tuple(cable_refs) + tuple(cable_refs),
+            ).fetchall()
+        )
+
+    footprint = None
+    xs: list[float] = []
+    ys: list[float] = []
+    for cable in route_cables:
+        for key_x, key_y in (
+            ("geom_start_x", "geom_start_y"),
+            ("geom_end_x", "geom_end_y"),
+            ("geom_centroid_x", "geom_centroid_y"),
+        ):
+            x = cable.get(key_x)
+            y = cable.get(key_y)
+            if x is not None and y is not None:
+                xs.append(float(x))
+                ys.append(float(y))
+    if xs and ys:
+        footprint = {
+            "min_x": min(xs),
+            "max_x": max(xs),
+            "min_y": min(ys),
+            "max_y": max(ys),
+            "centroid_x": round(sum(xs) / len(xs), 1),
+            "centroid_y": round(sum(ys) / len(ys), 1),
+        }
+
+    return {
+        "route": route,
+        "route_ref": effective_route_ref,
+        "route_id": effective_route_id,
+        "endpoints": endpoints,
+        "parcours": parcours,
+        "site_labels": site_labels,
+        "bpe_refs": bpe_refs,
+        "cable_refs": cable_refs,
+        "cables": route_cables,
+        "leases": route_leases,
+        "footprint": footprint,
+    }
+
+
+def _route_service_coherence(
+    con: sqlite3.Connection,
+    service_id: str,
+    route_ref: str,
+    *,
+    anchor: dict[str, Any] | None = None,
+    route_bundle: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    anchor = anchor or _build_site_anchor(con, service_id)
+    route_bundle = route_bundle or _build_route_topology_bundle(con, route_ref)
+    if route_bundle.get("error"):
+        return {
+            "route_ref": route_ref,
+            "coherence_level": "weak",
+            "score": 0,
+            "positive_signals": [],
+            "negative_signals": [route_bundle["error"]],
+        }
+
+    endpoint_rows = anchor.get("endpoints") or []
+    site_a_id = next(
+        (
+            row.get("matched_site_id")
+            for row in endpoint_rows
+            if row.get("endpoint_label") == "A"
+        ),
+        None,
+    )
+    site_z_id = next(
+        (
+            row.get("matched_site_id")
+            for row in endpoint_rows
+            if row.get("endpoint_label") == "Z"
+        ),
+        None,
+    )
+    site_tokens = _site_label_tokens(
+        anchor.get("endpoint_a_raw"),
+        anchor.get("endpoint_z_raw"),
+        *(row.get("matched_site_name") for row in endpoint_rows),
+    )
+
+    score = 0
+    positive: list[str] = []
+    negative: list[str] = []
+
+    route_labels = " ".join(route_bundle.get("site_labels") or [])
+    route_norm = _norm_token_text(route_labels)
+    matched_tokens = [token for token in site_tokens if token in route_norm]
+    if matched_tokens:
+        score += min(20, 8 * len(matched_tokens))
+        positive.append(
+            f"parcours contient tokens site {', '.join(matched_tokens[:4])}"
+        )
+    else:
+        negative.append("aucun token site du service retrouve dans le parcours")
+
+    lease_sites: set[str] = set()
+    if _table_or_view_exists(con, "ref_optical_lease_endpoint"):
+        for row in con.execute(
+            "SELECT DISTINCT site_id FROM ref_optical_lease_endpoint WHERE optical_lease_id IN (SELECT optical_lease_id FROM ref_optical_lease WHERE ref_exploit = ? OR ref_exploit LIKE ?)",
+            (route_bundle["route_ref"], f"%{route_bundle['route_ref']}%"),
+        ).fetchall():
+            if row["site_id"]:
+                lease_sites.add(str(row["site_id"]))
+    if site_z_id and site_z_id in lease_sites:
+        score += 35
+        positive.append("lease endpoint confirme le site Z")
+    if site_a_id and site_a_id in lease_sites:
+        score += 25
+        positive.append("lease endpoint confirme le site A")
+
+    anchor_geom = anchor.get("anchor_geometry") or {}
+    x = anchor_geom.get("x_l93")
+    y = anchor_geom.get("y_l93")
+    best_distance = None
+    for cable in route_bundle.get("cables") or []:
+        for key_x, key_y in (
+            ("geom_start_x", "geom_start_y"),
+            ("geom_end_x", "geom_end_y"),
+            ("geom_centroid_x", "geom_centroid_y"),
+        ):
+            if x is None or y is None:
+                continue
+            cx = cable.get(key_x)
+            cy = cable.get(key_y)
+            if cx is None or cy is None:
+                continue
+            dist = _distance_sq(float(x), float(y), float(cx), float(cy)) ** 0.5
+            if best_distance is None or dist < best_distance:
+                best_distance = dist
+    if best_distance is not None:
+        if best_distance <= 100:
+            score += 25
+            positive.append(
+                f"cable de la route a {best_distance:.1f}m de l'ancre geometrique"
+            )
+        elif best_distance <= 300:
+            score += 15
+            positive.append(
+                f"cable de la route a {best_distance:.1f}m de l'ancre geometrique"
+            )
+        elif best_distance <= 800:
+            score += 6
+            positive.append(
+                f"cable de la route a {best_distance:.1f}m de l'ancre geometrique"
+            )
+        else:
+            negative.append(
+                f"cables de la route loin de l'ancre geometrique ({best_distance:.1f}m)"
+            )
+
+    if route_bundle.get("endpoints"):
+        endpoint_norm = " ".join(
+            _norm_token_text(row.get("site_label"))
+            for row in route_bundle.get("endpoints") or []
+        )
+        matched_endpoint_tokens = [
+            token for token in site_tokens if token in endpoint_norm
+        ]
+        if matched_endpoint_tokens:
+            score += min(20, 10 * len(matched_endpoint_tokens))
+            positive.append(
+                f"endpoints de route contiennent {', '.join(matched_endpoint_tokens[:4])}"
+            )
+
+    if route_bundle.get("leases"):
+        score += min(10, 2 * len(route_bundle.get("leases") or []))
+        positive.append("route supportee par au moins une lease en base")
+
+    if score >= 70:
+        level = "strong"
+    elif score >= 35:
+        level = "medium"
+    else:
+        level = "weak"
+
+    return {
+        "route_ref": route_bundle["route_ref"],
+        "route_id": route_bundle.get("route_id"),
+        "coherence_level": level,
+        "score": score,
+        "best_distance_meters": round(best_distance, 1)
+        if best_distance is not None
+        else None,
+        "positive_signals": positive,
+        "negative_signals": negative,
     }
 
 
@@ -2446,10 +2914,43 @@ def _hunt_route_from_site(
             }
         )
 
+    for bucket in (direct_evidence, context_only):
+        for item in bucket:
+            route_ref = str(item.get("candidate_route_ref") or "").strip()
+            if not route_ref:
+                continue
+            coherence = _route_service_coherence(
+                con,
+                service_id,
+                route_ref,
+                anchor=anchor,
+            )
+            item["coherence"] = coherence
+            item.setdefault("evidence_for", []).extend(
+                coherence.get("positive_signals", [])[:3]
+            )
+            item.setdefault("evidence_against", []).extend(
+                coherence.get("negative_signals", [])[:2]
+            )
+
+    direct_evidence.sort(
+        key=lambda item: (
+            -int(item.get("coherence", {}).get("score") or 0),
+            item.get("candidate_route_ref") or "",
+        )
+    )
+    context_only.sort(
+        key=lambda item: (
+            -int(item.get("coherence", {}).get("score") or 0),
+            item.get("candidate_route_ref") or "",
+        )
+    )
+
     return {
         "service_id": service_id,
         "site_a_id": resolved_site_a,
         "site_z_id": resolved_site_z,
+        "anchor": anchor,
         "direct_evidence": direct_evidence,
         "context_only": context_only,
         "passive_chain": passive_chain,
@@ -2481,6 +2982,7 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
     context_only: list[dict[str, Any]] = []
     data_explored: list[str] = []
     seen_routes: set[str] = set()
+    anchor = _build_site_anchor(con, service_id)
     client_tokens = _extract_client_tokens(
         svc["client_final"],
         svc["principal_client"],
@@ -2864,11 +3366,45 @@ def _hunt_route(con: sqlite3.Connection, service_id: str) -> dict[str, Any]:
                 }
             )
 
+    for bucket in (direct_evidence, context_only):
+        for item in bucket:
+            route_ref = str(item.get("candidate_route_ref") or "").strip()
+            if not route_ref:
+                continue
+            coherence = _route_service_coherence(
+                con,
+                service_id,
+                route_ref,
+                anchor=anchor,
+            )
+            item["coherence"] = coherence
+            item.setdefault("evidence_for", []).extend(
+                coherence.get("positive_signals", [])[:3]
+            )
+            item.setdefault("evidence_against", []).extend(
+                coherence.get("negative_signals", [])[:2]
+            )
+
+    direct_evidence.sort(
+        key=lambda item: (
+            _VLAN_LEVEL_ORDER.get(item.get("proof_level", "weak"), 99),
+            -int(item.get("coherence", {}).get("score") or 0),
+            item.get("candidate_route_ref") or "",
+        )
+    )
+    context_only.sort(
+        key=lambda item: (
+            -int(item.get("coherence", {}).get("score") or 0),
+            item.get("candidate_route_ref") or "",
+        )
+    )
+
     return {
         "service_id": service_id,
         "nature_service": svc["nature_service"],
         "site_a": svc["site_a_name"],
         "site_z": svc["site_z_name"],
+        "anchor": anchor,
         "ref_external": ref_external or None,
         "toip_refs_in_lea": toip_refs,
         "direct_evidence": direct_evidence,
@@ -2948,6 +3484,49 @@ async def resolve_cable_spatial(args: dict[str, Any]) -> dict[str, Any]:
     con = _connect(read_only=True)
     try:
         payload = _resolve_cable_spatial(con, service_id, radius_meters=radius_meters)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "resolve_route_topology",
+    "Construit l'empreinte topologique d'une route: endpoints, parcours, BPE, cables, leases et footprint spatiale.",
+    {"route_ref": str},
+)
+async def resolve_route_topology(args: dict[str, Any]) -> dict[str, Any]:
+    route_ref = (args.get("route_ref") or "").strip()
+    if not route_ref:
+        return _text("ERROR: No route_ref provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _build_route_topology_bundle(con, route_ref)
+        return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        return _text(f"ERROR: {e}")
+    finally:
+        con.close()
+
+
+@tool(
+    "route_service_coherence",
+    "Evalue la coherence topo/spatiale entre un service et une route candidate. Retourne des sous-signaux explicables.",
+    {"service_id": str, "route_ref": str},
+)
+async def route_service_coherence(args: dict[str, Any]) -> dict[str, Any]:
+    service_id = (args.get("service_id") or "").strip()
+    route_ref = (args.get("route_ref") or "").strip()
+    if not service_id:
+        return _text("ERROR: No service_id provided.")
+    if not route_ref:
+        return _text("ERROR: No route_ref provided.")
+
+    con = _connect(read_only=True)
+    try:
+        payload = _route_service_coherence(con, service_id, route_ref)
         return _text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     except Exception as e:
         return _text(f"ERROR: {e}")

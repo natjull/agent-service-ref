@@ -143,6 +143,19 @@ def _has_party_search_evidence(evidences: list[dict[str, Any]]) -> bool:
     )
 
 
+def _coerce_evidences(resolution: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = resolution.get("evidences")
+    if raw in (None, "", []):
+        raw = resolution.get("evidence")
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    return []
+
+
 def _mentions_party_search_failure(justification: str) -> bool:
     lowered = justification.lower()
     required_markers = ("party", "final")
@@ -158,7 +171,7 @@ def _mentions_party_search_failure(justification: str) -> bool:
     "service_master_active. La resolution inclut les champs trouves "
     "(site_a, site_z, network_support_id, optical_support_ref, party_final, "
     "party_final_id), une confidence (high/medium/low), une justification, "
-    "et une liste d'evidences (au moins 1).",
+    "et une liste d'evidences (au moins 1). Les cles 'evidences' et 'evidence' sont toutes deux acceptees.",
     {"service_id": str, "resolution_json": str},
 )
 async def submit_resolution(args: dict[str, Any]) -> dict[str, Any]:
@@ -195,9 +208,11 @@ async def submit_resolution(args: dict[str, Any]) -> dict[str, Any]:
                 f"ERROR: confidence must be high/medium/low, got '{confidence}'."
             )
 
-        evidences = resolution.get("evidences", [])
+        evidences = _coerce_evidences(resolution)
         if not evidences:
-            return _text("ERROR: at least 1 evidence is required for traceability.")
+            return _text(
+                "ERROR: at least 1 evidence/evidences item is required for traceability."
+            )
 
         justification = resolution.get("justification", "").strip()
         if not justification:
@@ -449,6 +464,34 @@ async def validate_resolution(args: dict[str, Any]) -> dict[str, Any]:
                     errors.append("L2L sans network_vlan_id — resolution incomplete")
                 if not (res["route_ref"] or "").strip():
                     errors.append("L2L sans route_ref — resolution incomplete")
+                inferred_candidates: list[str] = []
+                raw_inferred = (res["inferred_vlans_json"] or "").strip()
+                if raw_inferred:
+                    try:
+                        parsed = json.loads(raw_inferred)
+                    except json.JSONDecodeError:
+                        parsed = []
+                    if isinstance(parsed, list):
+                        for item in parsed:
+                            if isinstance(item, dict):
+                                candidate = str(
+                                    item.get("network_vlan_id")
+                                    or item.get("candidate_vlan_id")
+                                    or item.get("vlan_id")
+                                    or ""
+                                ).strip()
+                            else:
+                                candidate = str(item or "").strip()
+                            if candidate:
+                                inferred_candidates.append(candidate)
+                distinct_candidates = sorted(set(inferred_candidates))
+                if len(distinct_candidates) > 1 and not (
+                    (res["network_interface_id"] or "").strip()
+                    or (res["cpe_id"] or "").strip()
+                ):
+                    warnings.append(
+                        "L2L avec plusieurs VLANs candidats non discrimines - needs_review"
+                    )
             elif nature_service in ("IRU FON", "Location FON"):
                 if not (res["route_ref"] or "").strip():
                     errors.append("FON sans route_ref — resolution incomplete")

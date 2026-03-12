@@ -185,6 +185,27 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
                 LEFT JOIN latest_agent la ON la.service_id = s.service_id
                 """
             ).fetchone()
+            route_anchor_stats = con.execute(
+                _latest_agent_resolutions_cte()
+                + """
+                SELECT
+                    COALESCE(SUM(CASE WHEN ae.evidence_type IN ('lease_site_pair_view', 'ref_exploit_exact', 'toip_lease') THEN 1 ELSE 0 END), 0) AS strong_route_anchors,
+                    COALESCE(SUM(CASE WHEN ae.evidence_type = 'lease_comment_token_match' THEN 1 ELSE 0 END), 0) AS text_route_anchors
+                FROM latest_agent la
+                LEFT JOIN agent_evidence ae ON ae.resolution_id = la.resolution_id
+                """
+            ).fetchone()
+            needs_review_by_nature = con.execute(
+                _latest_agent_resolutions_cte()
+                + """
+                SELECT
+                    COALESCE(SUM(CASE WHEN s.nature_service = 'Lan To Lan' AND la.status = 'needs_review' THEN 1 ELSE 0 END), 0) AS l2l_needs_review,
+                    COALESCE(SUM(CASE WHEN s.nature_service IN ('IRU FON', 'Location FON') AND la.status = 'needs_review' THEN 1 ELSE 0 END), 0) AS fon_needs_review,
+                    COALESCE(SUM(CASE WHEN la.status = 'declared_gap' THEN 1 ELSE 0 END), 0) AS declared_gap_total
+                FROM service_master_active s
+                LEFT JOIN latest_agent la ON la.service_id = s.service_id
+                """
+            ).fetchone()
 
             lines.append(f"\n AGENT RESOLUTIONS: {total_resolved}")
             for conf in ("high", "medium", "low"):
@@ -223,6 +244,16 @@ def compute_scorecard(db_path: Path, focus: str | None = None) -> str:
             )
             lines.append(
                 f"   FON declared_gap: {north_star['fon_declared_gap']}/{north_star['fon_total']}"
+            )
+            lines.append("\n QUALITE DE PREUVE:")
+            lines.append(
+                f"   Routes avec ancre forte (lease_site_pair/ref_exploit/TOIP): {route_anchor_stats['strong_route_anchors']}"
+            )
+            lines.append(
+                f"   Routes basees sur appui textuel lease/comments: {route_anchor_stats['text_route_anchors']}"
+            )
+            lines.append(
+                f"   L2L needs_review: {needs_review_by_nature['l2l_needs_review']} | FON needs_review: {needs_review_by_nature['fon_needs_review']} | declared_gap total: {needs_review_by_nature['declared_gap_total']}"
             )
 
             # Auto-valid confirmations

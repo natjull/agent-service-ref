@@ -58,6 +58,8 @@ from .tools.db_tools import (
     hunt_site_anchor,
     resolve_passive_chain,
     resolve_cable_spatial,
+    resolve_route_topology,
+    route_service_coherence,
     hunt_route_from_site,
     hunt_vlan,
     hunt_route,
@@ -97,6 +99,8 @@ def create_service_ref_server():
             hunt_site_anchor,
             resolve_passive_chain,
             resolve_cable_spatial,
+            resolve_route_topology,
+            route_service_coherence,
             hunt_route_from_site,
             hunt_vlan,
             hunt_route,
@@ -177,6 +181,8 @@ def create_agent_options(
             "mcp__service-ref__hunt_site_anchor",
             "mcp__service-ref__resolve_passive_chain",
             "mcp__service-ref__resolve_cable_spatial",
+            "mcp__service-ref__resolve_route_topology",
+            "mcp__service-ref__route_service_coherence",
             "mcp__service-ref__hunt_route_from_site",
             "mcp__service-ref__hunt_vlan",
             "mcp__service-ref__hunt_route",
@@ -262,6 +268,10 @@ def _tool_summary(block: ToolUseBlock) -> str:
         )
     elif name == "resolve_cable_spatial":
         return f"resolve_cable_spatial — {inp.get('service_id', '?')}"
+    elif name == "resolve_route_topology":
+        return f"resolve_route_topology — {inp.get('route_ref', '?')}"
+    elif name == "route_service_coherence":
+        return f"route_service_coherence — {inp.get('service_id', '?')}"
     elif name == "hunt_route_from_site":
         return f"hunt_route_from_site — {inp.get('service_id', '?')}"
     elif name == "hunt_vlan":
